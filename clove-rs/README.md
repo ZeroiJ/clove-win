@@ -5,9 +5,10 @@ identity renderer are framework-independent: nothing here imports a UI framework
 
 | Crate | Role |
 |---|---|
-| `clove-fs` | Entry model, directory listing, sort, folded names, long-path handling |
+| `clove-fs` | Entry model, directory listing, sort, folded names, long paths, `ReadDirectoryChangesW` watching |
 | `clove-search` | Scored per-keystroke filter + cancellable worker (no index, as the Swift app) |
 | `clove-render` | Clove's dithered storage bar as pure CPU rendering + design tokens |
+| `clove-shell` | Delete/trash safety: direct-child guards, receipts, Recycle Bin moves, put-back |
 | `clove-cli` | Headless test surface: `list`, `find`, `bar --out x.png`, `bench` |
 
 ## Commands
@@ -35,3 +36,15 @@ places it over the surface color.
 Not yet in this slice (Phase C fidelity pass): the overlay layer (filaments, seams, motes),
 glow spill outside the bar (6-cell pad), the 1 px border, and scan heat/focus/spill
 animation. The renderer's `render(t)` already drifts the clouds and flickers glints.
+
+## Fidelity notes: trash
+
+`clove-shell` ports `Clove/Storage/StorageSafety.swift` semantics: every delete re-verifies
+that the target is a direct child of its root, links are removed as links, and each moved
+item records where it went so `put_back` is a plain move. On Windows the trash is the real
+Recycle Bin (`SHFileOperationW` + `FOF_ALLOWUNDO`), and the `$R…` payload path is recovered
+from the matching `$I…` record — that is what makes `Move::trashed` exact.
+
+`SHFileOperationW` is subject to the classic 260-character path limit; long-path trash is a
+Phase D item (`06-roadmap.md`), and a path the shell refuses is counted as a failure rather
+than silently dropped.

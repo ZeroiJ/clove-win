@@ -4,6 +4,7 @@ members = [
     "crates/clove-fs",
     "crates/clove-search",
     "crates/clove-render",
+    "crates/clove-shell",
     "crates/clove-cli",
 ]
 
@@ -16,6 +17,7 @@ license = "MIT"
 clove-fs = { path = "crates/clove-fs" }
 clove-search = { path = "crates/clove-search" }
 clove-render = { path = "crates/clove-render" }
+clove-shell = { path = "crates/clove-shell" }
 
 [profile.release]
 lto = "thin"
