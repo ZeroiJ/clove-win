@@ -117,6 +117,9 @@ pub struct BarRenderer {
     flicker_seed: Vec<f32>,
     last_t: Option<f32>,
     initialized: bool,
+    /// Bumped whenever `render` repaints at least one cell. The UI compares it to skip
+    /// re-uploading a buffer that did not change.
+    frame_seq: u64,
 }
 
 impl BarRenderer {
@@ -219,7 +222,16 @@ impl BarRenderer {
                 .collect(),
             last_t: None,
             initialized: false,
+            frame_seq: 0,
         }
+    }
+
+    /// A counter that changes only when a `render` call actually repainted a cell.
+    ///
+    /// The bar settles: clouds drift slowly and glints blink, so many frames produce no
+    /// visible change. The UI uses this to upload pixels only when there is something new.
+    pub fn frame_seq(&self) -> u64 {
+        self.frame_seq
     }
 
     pub fn spec(&self) -> &BarSpec {
@@ -348,13 +360,18 @@ impl BarRenderer {
         }
 
         // 3. Recomposite only cells whose paint or glow changed.
+        let mut any_dirty = false;
         for c in 0..self.glints.len() {
             let dirty = !self.initialized
                 || self.cur_paint[c] != self.prev_paint[c]
                 || self.cur_glow[c] != self.prev_glow[c];
             if dirty {
                 self.draw_cell(c);
+                any_dirty = true;
             }
+        }
+        if any_dirty {
+            self.frame_seq += 1;
         }
 
         self.prev_paint.copy_from_slice(&self.cur_paint);

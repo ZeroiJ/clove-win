@@ -6,6 +6,16 @@ members = [
     "crates/clove-render",
     "crates/clove-shell",
     "crates/clove-cli",
+    "crates/clove-ui",
+]
+# `cargo build`/`cargo test` at the root stay engine-only and fast; the app is built
+# explicitly with `cargo run -p clove-ui` (it pulls Rune and a GPU stack).
+default-members = [
+    "crates/clove-fs",
+    "crates/clove-search",
+    "crates/clove-render",
+    "crates/clove-shell",
+    "crates/clove-cli",
 ]
 
 [workspace.package]
@@ -22,3 +32,17 @@ clove-shell = { path = "crates/clove-shell" }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Rune's README requires every app that builds it to carry these entries: a dependency's own
+# [patch] section does not apply to the workspace that depends on it. Rune is pinned to a
+# shallow clone of `dev` under `../prototypes/_rune-upstream`; in production this becomes a
+# git dependency on a recorded rev.
+#
+# NOTE: `vendor/tiny-skia-path` is a plain path dependency of `crates/rune`, NOT a patch —
+# patching it here breaks resvg/usvg.
+[patch.crates-io]
+wgpu-hal = { path = "../prototypes/_rune-upstream/vendor/wgpu-hal" }
+winit = { path = "../prototypes/_rune-upstream/vendor/winit" }
+parley_engine = { path = "../prototypes/_rune-upstream/vendor/parley_engine" }
+accesskit_windows = { path = "../prototypes/_rune-upstream/vendor/accesskit_windows" }
+accesskit_macos = { path = "../prototypes/_rune-upstream/vendor/accesskit_macos" }

@@ -1,0 +1,17 @@
+[package]
+name = "clove-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Clove for Windows — the Rune app. The only crate that may name a UI framework."
+
+[[bin]]
+name = "clove"
+path = "src/main.rs"
+
+[dependencies]
+clove-fs.workspace = true
+clove-search.workspace = true
+clove-render.workspace = true
+clove-shell.workspace = true
+rune = { path = "../../../prototypes/_rune-upstream/crates/rune" }
