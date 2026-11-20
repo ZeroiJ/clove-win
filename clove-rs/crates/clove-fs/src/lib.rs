@@ -9,6 +9,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
+pub mod watch;
+
+pub use watch::{DirWatcher, WatchSignal};
+
 /// One directory entry as the UI sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
