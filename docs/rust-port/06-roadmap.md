@@ -1,13 +1,14 @@
 # 6 · Roadmap — Clove for Windows (Rust)
 
-Status: **proposal — awaiting architecture approval.** Phases are ordered so every step ends
-in something runnable, and the two riskiest unknowns (Rune-on-Windows behaviour, storage-scan
-performance) are hit early.
+Status: **approved; Phase A complete** (see `07-phase-a-status.md`). Phases are ordered so
+every step ends in something runnable, and the two riskiest unknowns (Rune-on-Windows
+behaviour, storage-scan performance) are hit early.
 
-## Phase A — Engine crates, headless (no UI)
+## Phase A — Engine crates, headless (no UI) — **done**
 
 Deliverable: `clove-fs`, `clove-search`, `clove-shell`, `clove-render` as tested library
 crates; a headless CLI (`clove-cli`) that lists, filters and renders the bar to PNG.
+Workspace lives in `clove-rs/`; results are in `07-phase-a-status.md`.
 
 1. **clove-fs**: entry model, `read_dir` listing with metadata + sort, atomic snapshot swap,
    `ReadDirectoryChangesW` watcher, long-path guards. Bench: System32-class listing.
@@ -19,13 +20,14 @@ crates; a headless CLI (`clove-cli`) that lists, filters and renders the bar to 
    full 936-pt frame, which is too much to pay every animation frame; dirty rects and the
    settle-stop contract bring the amortised cost near zero. Tokens module (palette/spacing/
    radii/typography constants).
-4. **clove-shell**: trash receipts, re-verify-at-delete, `IFileOperation` recycle-bin move,
-   restore. Integration tests with a temp recycle sandbox.
-5. **clove-cli**: `clove list <dir>`, `clove bar <w> --png out.png`, `clove find <dir> <q>`.
+4. **clove-shell**: trash receipts, re-verify-at-delete, Recycle Bin move (`SHFileOperationW`
+   + `FOF_ALLOWUNDO`), receipt resolution via `$I` records, put-back. Integration tests with
+   a real recycle → put-back round trip.
+5. **clove-cli**: `clove list <dir>`, `clove bar <w> --out out.png`, `clove find <dir> <q>`.
    This is the CI test surface — no window needed.
 
-Exit criteria: engine benches recorded in CI; PNG bar pixel-diffed against the Swift
-reference screenshots (from Phase 0 captures) with a small tolerance.
+Exit criteria: engine benches recorded in CI ✅; PNG bar pixel-diffed against the Swift
+reference screenshots ⏳ **needs captures from a Mac — moved to Phase C.**
 
 ## Phase B — Rune app skeleton
 
@@ -44,10 +46,14 @@ reads the list).
 
 ## Phase C — Identity & polish pass
 
-1. Pixel-diff the bar and chrome against Swift Clove screenshots; fix drift.
-2. Motion: springs on selection, presence transitions, settle-stop (already in Rune's model).
-3. Typography scale + spacing audit against `Metrics.swift`/`Typography.swift`.
-4. Icons: trace Clove's glyph set to vector paths; pattern helpers for hairlines/nested cards.
+1. **Prerequisite:** capture the Swift app on a Mac (bar at rest, bar mid-scan, browser,
+   storage card) into `img/reference/`. Phase A's pixel-diff exit criterion moved here
+   because it cannot be satisfied without them.
+2. Pixel-diff the bar and chrome against those captures; fix drift. Known drift to fix:
+   bilinear glow upscale, overlay layer (filaments/seams/motes), glow spill pad, 1 px border.
+3. Motion: springs on selection, presence transitions, settle-stop (already in Rune's model).
+4. Typography scale + spacing audit against `Metrics.swift`/`Typography.swift`.
+5. Icons: trace Clove's glyph set to vector paths; pattern helpers for hairlines/nested cards.
 
 ## Phase D — Windows integration hardening
 
