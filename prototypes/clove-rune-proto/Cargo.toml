@@ -1,0 +1,21 @@
+[package]
+name = "clove-rune-proto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Path dep on the shallow clone of Rune's dev branch. In production this is a
+# git dep pinned to a `dev` rev — but Rune's README requires every app that
+# builds it to carry the [patch.crates-io] entries below (a dependency's own
+# [patch] section does not apply to the workspace that depends on it).
+rune = { path = "../_rune-upstream/crates/rune" }
+
+[patch.crates-io]
+wgpu-hal = { path = "../_rune-upstream/vendor/wgpu-hal" }
+winit = { path = "../_rune-upstream/vendor/winit" }
+parley_engine = { path = "../_rune-upstream/vendor/parley_engine" }
+accesskit_windows = { path = "../_rune-upstream/vendor/accesskit_windows" }
+accesskit_macos = { path = "../_rune-upstream/vendor/accesskit_macos" }
+# NOTE: vendor/tiny-skia-path is a plain path dependency of crates/rune itself,
+# NOT a patch — patching it here breaks resvg/usvg (they add ConicTo).
+

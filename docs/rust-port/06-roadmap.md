@@ -1,0 +1,78 @@
+# 6 · Roadmap — Clove for Windows (Rust)
+
+Status: **proposal — awaiting architecture approval.** Phases are ordered so every step ends
+in something runnable, and the two riskiest unknowns (Rune-on-Windows behaviour, storage-scan
+performance) are hit early.
+
+## Phase A — Engine crates, headless (no UI)
+
+Deliverable: `clove-fs`, `clove-search`, `clove-shell`, `clove-render` as tested library
+crates; a headless CLI (`clove-cli`) that lists, filters and renders the bar to PNG.
+
+1. **clove-fs**: entry model, `read_dir` listing with metadata + sort, atomic snapshot swap,
+   `ReadDirectoryChangesW` watcher, long-path guards. Bench: System32-class listing.
+2. **clove-search**: scored fuzzy filter, generation-cancelling worker, **pre-folded name
+   cache** (the prototype measured 5–8× faster than per-keystroke lowering — see `04`).
+   Bench: 100k entries per keystroke.
+3. **clove-render**: the dithered bar ported from the prototype's `lib.rs`, plus dirty-rect
+   rendering (only re-render rows whose inputs changed) — the prototype measured ~12 ms per
+   full 936-pt frame, which is too much to pay every animation frame; dirty rects and the
+   settle-stop contract bring the amortised cost near zero. Tokens module (palette/spacing/
+   radii/typography constants).
+4. **clove-shell**: trash receipts, re-verify-at-delete, `IFileOperation` recycle-bin move,
+   restore. Integration tests with a temp recycle sandbox.
+5. **clove-cli**: `clove list <dir>`, `clove bar <w> --png out.png`, `clove find <dir> <q>`.
+   This is the CI test surface — no window needed.
+
+Exit criteria: engine benches recorded in CI; PNG bar pixel-diffed against the Swift
+reference screenshots (from Phase 0 captures) with a small tolerance.
+
+## Phase B — Rune app skeleton
+
+Deliverable: `clove-ui` running the prototype's three surfaces against the real engine crates.
+
+1. Workspace wiring with `[patch.crates-io]` vendored-patches from a **pinned** Rune `dev`
+   commit (recorded in the workspace; upgrades are explicit events).
+2. Browser surface: virtualized list + background dir load + filter + keyboard navigation
+   (the prototype already proves the shape; here it consumes `clove-fs`/`clove-search`).
+3. Storage surface: kind scan (3-concurrent, `.utility`-equivalent priority, 30-min cache),
+   animated bar via `Pixels` + settle-stop, kind legend.
+4. Shell surface: delete-to-trash with receipt, undo toast, error badges.
+
+Exit criteria: daily-driver-able over `C:\Users\<user>`; a11y labels on all rows (Narrator
+reads the list).
+
+## Phase C — Identity & polish pass
+
+1. Pixel-diff the bar and chrome against Swift Clove screenshots; fix drift.
+2. Motion: springs on selection, presence transitions, settle-stop (already in Rune's model).
+3. Typography scale + spacing audit against `Metrics.swift`/`Typography.swift`.
+4. Icons: trace Clove's glyph set to vector paths; pattern helpers for hairlines/nested cards.
+
+## Phase D — Windows integration hardening
+
+1. DPI scaling tests (100/125/150/200%), per-monitor DPI change.
+2. IME check (CJK input in the filter box), keyboard layouts.
+3. OneDrive placeholders: list without hydrating; explicit intent for offline files.
+4. Long paths (`\\?\`), junctions, drive roots, network shares (slow-path policy).
+5. Jump list / taskbar integration if the Swift app had equivalents (per Phase 0 inventory).
+
+## Phase E — Performance & release
+
+1. Rune `--profile perf`-style benches wired into CI; launch-to-first-frame budget.
+2. Memory budget check (procwatch): entry cache bounds (entries + bytes).
+3. Installer (MSIX or NSIS), auto-update decision, telemetry decision (default: none).
+
+## Milestone dates
+
+Not dated until approval; estimate as effort bands instead:
+
+- Phase A: the largest chunk of *new* Rust (~2/5 of total effort).
+- Phase B: medium — the prototype de-risks it.
+- Phase C/D/E: each small-medium; C and D can interleave with B's tail.
+
+## What we explicitly defer
+
+- Multi-window, tabs, tags: not in the Swift app.
+- macOS support in Rust: Windows only (the Swift app remains the Mac product).
+- A search index: preserved no-index design; revisit only if benches show a real need.

@@ -13,3 +13,11 @@ dist/
 *.dSYM
 .swiftpm/
 .env
+
+# Rust
+/target/
+/clove-rs/target/
+/prototypes/*/target/
+# shallow clone of rune's dev branch used for prototyping (upstream code, not ours)
+/prototypes/_rune-upstream/
+
