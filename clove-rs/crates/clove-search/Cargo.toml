@@ -1,0 +1,9 @@
+[package]
+name = "clove-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Clove's per-keystroke scored filtering, with a cancellable worker (no index)"
+
+[dependencies]
+clove-fs.workspace = true

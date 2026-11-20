@@ -1,0 +1,6 @@
+[package]
+name = "clove-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Clove's filesystem engine: listing, sorting, folded names (no UI framework)"
