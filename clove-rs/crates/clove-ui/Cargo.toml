@@ -15,4 +15,5 @@ clove-search.workspace = true
 clove-render.workspace = true
 clove-shell.workspace = true
 arboard = "3.7"
+image = "0.25"
 rune = { path = "../../../prototypes/_rune-upstream/crates/rune" }

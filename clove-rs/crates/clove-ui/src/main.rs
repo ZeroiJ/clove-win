@@ -117,6 +117,8 @@ struct State {
     renaming: Option<usize>,
     rename_text: TextEdit,
     context_menu: Option<usize>,
+    thumbnails: std::collections::HashMap<PathBuf, (u32, u32, Vec<u8>)>,
+    thumbnail_pending: std::collections::HashSet<PathBuf>,
     status: String,
     loading: bool,
     /// Receipt from the last trash, so Ctrl+Z can put it back.
@@ -561,6 +563,48 @@ fn dir_size(path: &Path) -> u64 {
     total
 }
 
+fn load_thumbnails(s: &mut State) {
+    let entries: Vec<(usize, PathBuf)> = s
+        .snapshot
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            if e.is_dir { return None; }
+            let path = entry_path(&s.location, e)?;
+            let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
+            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp") {
+                return None;
+            }
+            if s.thumbnails.contains_key(&path) || s.thumbnail_pending.contains(&path) {
+                return None;
+            }
+            Some((i, path))
+        })
+        .collect();
+    for (_, path) in entries {
+        s.thumbnail_pending.insert(path.clone());
+        let handle = s.handle.clone();
+        let path2 = path.clone();
+        std::thread::spawn(move || {
+            let mut rgba = None;
+            let mut dims = None;
+            if let Ok(img) = image::open(&path2) {
+                let thumb = img.thumbnail(64, 64);
+                let rgba8 = thumb.to_rgba8();
+                dims = Some((rgba8.width(), rgba8.height()));
+                rgba = Some(rgba8.into_raw());
+            }
+            handle.update(move |s, _| {
+                s.thumbnail_pending.remove(&path2);
+                if let (Some(d), Some(r)) = (dims, rgba) {
+                    s.thumbnails.insert(path2, (d.0, d.1, r));
+                }
+            });
+        });
+    }
+}
+
 fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
@@ -736,7 +780,13 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     // Ctrl+1/2/3 view modes.
     if ev.is_command('1') { s.view_mode = 0; save_settings(s); s.status = "view: details".into(); return true; }
     if ev.is_command('2') { s.view_mode = 1; save_settings(s); s.status = "view: list".into(); return true; }
-    if ev.is_command('3') { s.view_mode = 2; save_settings(s); s.status = "view: grid".into(); return true; }
+    if ev.is_command('3') {
+        s.view_mode = 2;
+        save_settings(s);
+        s.status = "view: grid".into();
+        load_thumbnails(s);
+        return true;
+    }
     // Ctrl+P preview pane.
     if ev.is_command('p') { s.preview_open = !s.preview_open; return true; }
     // Ctrl+F search within folder.
@@ -1429,6 +1479,34 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                         col = col.child(text(format!("{} results", s.search_results.len())).font(type_::LABEL).color(ink_secondary()));
                     }
                     col
+                } else if s.view_mode == 2 {
+                    let mut row = row().key("grid").w_full().flex_wrap().gap(8.0);
+                    for i in 0..count {
+                        let idx = s.filtered[i];
+                        let entry = &s.snapshot.entries[idx];
+                        let name = entry.name.clone();
+                        let path = entry_path(&s.location, entry);
+                        let thumb = path.as_ref().and_then(|p| s.thumbnails.get(p));
+                        let mut card = col()
+                            .key(format!("card-{idx}"))
+                            .w(96.0)
+                            .h(112.0)
+                            .padding(6.0)
+                            .gap(4.0)
+                            .radius(tokens::RADIUS_CONTROL)
+                            .fill(surface())
+                            .center_y();
+                        if let Some((w, h, rgba)) = thumb {
+                            let px = Pixels::new();
+                            px.set(*w, *h, rgba.clone());
+                            card = card.child(el().w(64.0).h(64.0).pixels_fit(&px, rune::SurfaceFit::Fit));
+                        } else {
+                            card = card.child(el().w(64.0).h(64.0).fill(bg()).child(text(if entry.is_dir { "📁" } else { "📄" }).font(type_::TITLE).color(ink())));
+                        }
+                        card = card.child(text(name).font(type_::LABEL).color(ink_secondary()));
+                        row = row.child(card);
+                    }
+                    row
                 } else {
                     col()
                         .key("rows")
@@ -1788,6 +1866,8 @@ fn build_state(handle: AppHandle<State>) -> State {
         renaming: None,
         rename_text: TextEdit::new(""),
         context_menu: None,
+        thumbnails: std::collections::HashMap::new(),
+        thumbnail_pending: std::collections::HashSet::new(),
         show_hidden,
         status: String::new(),
         loading: false,
