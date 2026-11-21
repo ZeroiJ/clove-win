@@ -103,6 +103,9 @@ struct State {
     anchor: Option<usize>,
     clipboard: Vec<PathBuf>,
     clipboard_cut: bool,
+    sort_by: u8,
+    sort_desc: bool,
+    folders_first: bool,
     status: String,
     loading: bool,
     /// Receipt from the last trash, so Ctrl+Z can put it back.
@@ -143,6 +146,29 @@ fn refilter(s: &mut State) {
         idx.retain(|&i| {
             let e = &s.snapshot.entries[i];
             !e.hidden && !e.system
+        });
+    }
+    // Sort when not filtering by query (search ranking wins otherwise).
+    if s.query.text.trim().is_empty() {
+        let sort_by = s.sort_by;
+        let desc = s.sort_desc;
+        let folders_first = s.folders_first;
+        idx.sort_by(|&a, &b| {
+            let ea = &s.snapshot.entries[a];
+            let eb = &s.snapshot.entries[b];
+            if folders_first {
+                let fc = eb.is_dir.cmp(&ea.is_dir);
+                if fc != std::cmp::Ordering::Equal {
+                    return fc;
+                }
+            }
+            let ord = match sort_by {
+                1 => ea.size.cmp(&eb.size),
+                2 => ea.name.rsplit('.').next().unwrap_or("").cmp(&eb.name.rsplit('.').next().unwrap_or("")),
+                3 => ea.modified.cmp(&eb.modified),
+                _ => ea.name_folded.cmp(&eb.name_folded),
+            };
+            if desc { ord.reverse() } else { ord }
         });
     }
     s.filtered = idx;
@@ -616,6 +642,26 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                 });
             });
         }
+        return true;
+    }
+    // F3 cycles sort field, F4 toggles direction, F5 toggles folders-first.
+    if ev.key == Key::Function(3) {
+        s.sort_by = (s.sort_by + 1) % 4;
+        refilter(s);
+        let names = ["name", "size", "type", "modified"];
+        s.status = format!("sort by {}", names[s.sort_by as usize]);
+        return true;
+    }
+    if ev.key == Key::Function(4) {
+        s.sort_desc = !s.sort_desc;
+        refilter(s);
+        s.status = if s.sort_desc { "sort: descending".into() } else { "sort: ascending".into() };
+        return true;
+    }
+    if ev.key == Key::Function(5) {
+        s.folders_first = !s.folders_first;
+        refilter(s);
+        s.status = if s.folders_first { "folders first".into() } else { "folders mixed".into() };
         return true;
     }
     // Ctrl+R (Cmd+R) re-measures the disk.
@@ -1304,6 +1350,9 @@ fn build_state(handle: AppHandle<State>) -> State {
         anchor: None,
         clipboard: Vec::new(),
         clipboard_cut: false,
+        sort_by: 0,
+        sort_desc: false,
+        folders_first: true,
         status: String::new(),
         loading: false,
         undo: None,
