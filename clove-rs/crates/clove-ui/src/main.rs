@@ -106,6 +106,14 @@ struct State {
     sort_by: u8,
     sort_desc: bool,
     folders_first: bool,
+    view_mode: u8,
+    preview_open: bool,
+    search_mode: bool,
+    search_query: TextEdit,
+    search_results: Vec<PathBuf>,
+    properties_path: Option<PathBuf>,
+    properties_size: Option<u64>,
+    properties_loading: bool,
     status: String,
     loading: bool,
     /// Receipt from the last trash, so Ctrl+Z can put it back.
@@ -496,6 +504,23 @@ fn undo_delete(s: &mut State) {
     });
 }
 
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(path) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_dir() {
+                    total += dir_size(&p);
+                } else {
+                    total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+            }
+        }
+    }
+    total
+}
+
 fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
@@ -524,6 +549,7 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     if ev.is_command('h') {
         s.show_hidden = !s.show_hidden;
         refilter(s);
+        save_settings(s);
         s.status = if s.show_hidden { "showing hidden files".into() } else { "hidden files hidden".into() };
         return true;
     }
@@ -648,6 +674,7 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     if ev.key == Key::Function(3) {
         s.sort_by = (s.sort_by + 1) % 4;
         refilter(s);
+        save_settings(s);
         let names = ["name", "size", "type", "modified"];
         s.status = format!("sort by {}", names[s.sort_by as usize]);
         return true;
@@ -655,13 +682,54 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     if ev.key == Key::Function(4) {
         s.sort_desc = !s.sort_desc;
         refilter(s);
+        save_settings(s);
         s.status = if s.sort_desc { "sort: descending".into() } else { "sort: ascending".into() };
         return true;
     }
     if ev.key == Key::Function(5) {
         s.folders_first = !s.folders_first;
         refilter(s);
+        save_settings(s);
         s.status = if s.folders_first { "folders first".into() } else { "folders mixed".into() };
+        return true;
+    }
+    // Ctrl+1/2/3 view modes.
+    if ev.is_command('1') { s.view_mode = 0; save_settings(s); s.status = "view: details".into(); return true; }
+    if ev.is_command('2') { s.view_mode = 1; save_settings(s); s.status = "view: list".into(); return true; }
+    if ev.is_command('3') { s.view_mode = 2; save_settings(s); s.status = "view: grid".into(); return true; }
+    // Ctrl+P preview pane.
+    if ev.is_command('p') { s.preview_open = !s.preview_open; return true; }
+    // Ctrl+F search within folder.
+    if ev.is_command('f') {
+        s.search_mode = !s.search_mode;
+        if s.search_mode { s.status = "search (esc to exit)".into(); }
+        return true;
+    }
+    // F2 rename (placeholder: sets status; full inline edit deferred).
+    if ev.key == Key::Function(2) {
+        s.status = "rename: not yet implemented".into();
+        return true;
+    }
+    // Ctrl+I properties.
+    if ev.is_command('i') {
+        if let Some(&idx) = s.filtered.get(s.cursor) {
+            if let Some(entry) = s.snapshot.entries.get(idx) {
+                if let Some(p) = entry_path(&s.location, entry) {
+                    s.properties_path = Some(p);
+                    s.properties_size = None;
+                    s.properties_loading = true;
+                    let path = s.properties_path.clone().unwrap();
+                    let handle = s.handle.clone();
+                    std::thread::spawn(move || {
+                        let size = if path.is_dir() { dir_size(&path) } else { path.metadata().map(|m| m.len()).unwrap_or(0) };
+                        handle.update(move |s, _| {
+                            s.properties_size = Some(size);
+                            s.properties_loading = false;
+                        });
+                    });
+                }
+            }
+        }
         return true;
     }
     // Ctrl+R (Cmd+R) re-measures the disk.
@@ -780,6 +848,14 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             true
         }
         Key::Escape => {
+            if s.properties_path.is_some() {
+                s.properties_path = None;
+                return true;
+            }
+            if s.search_mode {
+                s.search_mode = false;
+                return true;
+            }
             if s.query.text.is_empty() {
                 false
             } else {
@@ -1207,6 +1283,38 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                         ),
                 ),
         )
+        // Preview pane (toggle Ctrl+P).
+        .child(if s.preview_open {
+            let txt = if let Some(&idx) = s.filtered.get(s.cursor) {
+                if let Some(entry) = s.snapshot.entries.get(idx) {
+                    if let Some(path) = entry_path(&s.location, entry) {
+                        if path.is_file() {
+                            std::fs::read_to_string(&path)
+                                .map(|t| t.chars().take(1500).collect::<String>())
+                                .unwrap_or_else(|_| "[binary or unreadable]".to_string())
+                        } else {
+                            format!("[folder: {}]", path.display())
+                        }
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            col()
+                .key("preview")
+                .w_full()
+                .h(120.0)
+                .padding(8.0)
+                .radius(tokens::RADIUS_CONTROL)
+                .fill(surface())
+                .child(text(txt).font(type_::BODY).color(ink_secondary()))
+        } else {
+            col().key("preview-off").w_full().h(0.0)
+        })
         // Status bar.
         .child(
             row()
@@ -1231,9 +1339,96 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                         .color(ink_secondary()),
                 ),
         )
+        // Properties dialog (Ctrl+I).
+        .child(if s.properties_path.is_some() {
+            let path = s.properties_path.clone().unwrap();
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string());
+            let size = s.properties_size;
+            let loading = s.properties_loading;
+            col()
+                .key("props-overlay")
+                .w_full()
+                .h_full()
+                .center()
+                .child(
+                    col()
+                        .key("props-card")
+                        .w(420.0)
+                        .padding(16.0)
+                        .gap(8.0)
+                        .radius(tokens::RADIUS_BAR)
+                        .fill(surface())
+                        .child(text(format!("Properties: {}", name)).font(type_::TITLE).color(ink()))
+                        .child(text(format!("Location: {}", path.display())).font(type_::LABEL).color(ink_secondary()))
+                        .child(text(format!("Type: {}", if path.is_dir() { "Folder" } else { "File" })).font(type_::LABEL).color(ink_secondary()))
+                        .child(text(if loading {
+                            "Size: calculating...".to_string()
+                        } else if let Some(sz) = size {
+                            format!("Size: {}", format_size(sz))
+                        } else {
+                            "Size: unknown".to_string()
+                        }).font(type_::LABEL).color(ink_secondary()))
+                        .child(
+                            el()
+                                .key("props-close")
+                                .w(80.0).h(28.0)
+                                .radius(tokens::RADIUS_CONTROL)
+                                .fill(bg())
+                                .center()
+                                .child(text("Close").font(type_::BODY).color(ink()))
+                                .on_press(|s: &mut State| { s.properties_path = None; }),
+                        ),
+                )
+        } else {
+            col().key("props-off").w(0.0).h(0.0)
+        })
 }
 
 // ---------------------------------------------------------------- main
+
+fn settings_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .map(|p| p.join("Clove").join("settings.json"))
+}
+
+fn load_settings() -> Option<(u8, bool, bool, u8, bool)> {
+    let path = settings_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    // Very small manual parser: key:value pairs.
+    let mut sort_by = 0u8;
+    let mut sort_desc = false;
+    let mut folders_first = true;
+    let mut view_mode = 0u8;
+    let mut show_hidden = false;
+    for line in text.lines() {
+        let line = line.trim().trim_matches(|c| c == '{' || c == '}' || c == ',');
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim().trim_matches('"');
+            let v = v.trim().trim_matches(',').trim();
+            match k {
+                "sort_by" => sort_by = v.parse().unwrap_or(0),
+                "sort_desc" => sort_desc = v == "true",
+                "folders_first" => folders_first = v == "true",
+                "view_mode" => view_mode = v.parse().unwrap_or(0),
+                "show_hidden" => show_hidden = v == "true",
+                _ => {}
+            }
+        }
+    }
+    Some((sort_by, sort_desc, folders_first, view_mode, show_hidden))
+}
+
+fn save_settings(s: &State) {
+    if let Some(path) = settings_path() {
+        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+        let text = format!(
+            "{{\n  \"sort_by\": {},\n  \"sort_desc\": {},\n  \"folders_first\": {},\n  \"view_mode\": {},\n  \"show_hidden\": {}\n}}",
+            s.sort_by, s.sort_desc, s.folders_first, s.view_mode, s.show_hidden
+        );
+        let _ = std::fs::write(path, text);
+    }
+}
 
 fn storage_cache_path() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA")
@@ -1292,6 +1487,9 @@ fn start_dir() -> PathBuf {
 fn build_state(handle: AppHandle<State>) -> State {
     let location = Location::ThisPc;
 
+    let (sort_by, sort_desc, folders_first, view_mode, show_hidden) =
+        load_settings().unwrap_or((0, false, true, 0, false));
+
     let cached = load_storage_cache();
     let (storage_bytes, storage_capacity, storage_used, storage_has_data, storage_ready, scan_started) =
         if let Some((bytes, capacity, used)) = cached {
@@ -1331,7 +1529,9 @@ fn build_state(handle: AppHandle<State>) -> State {
     bar.set(w as u32, h as u32, bar_renderer.buffer().to_vec());
 
     let pc_entries = this_pc_entries();
-    let filtered: Vec<usize> = (0..pc_entries.len()).collect();
+    let filtered: Vec<usize> = (0..pc_entries.len())
+        .filter(|&i| show_hidden || !(pc_entries[i].hidden || pc_entries[i].system))
+        .collect();
     let mut selected = std::collections::HashSet::new();
     if let Some(&i) = filtered.first() {
         selected.insert(i);
@@ -1350,9 +1550,18 @@ fn build_state(handle: AppHandle<State>) -> State {
         anchor: None,
         clipboard: Vec::new(),
         clipboard_cut: false,
-        sort_by: 0,
-        sort_desc: false,
-        folders_first: true,
+        sort_by,
+        sort_desc,
+        folders_first,
+        view_mode,
+        preview_open: false,
+        search_mode: false,
+        search_query: TextEdit::new(""),
+        search_results: Vec::new(),
+        properties_path: None,
+        properties_size: None,
+        properties_loading: false,
+        show_hidden,
         status: String::new(),
         loading: false,
         undo: None,
@@ -1371,7 +1580,6 @@ fn build_state(handle: AppHandle<State>) -> State {
         storage_ready,
         storage_has_data,
         bar_width: 936.0,
-        show_hidden: false,
     }
 }
 
