@@ -577,6 +577,7 @@ dependencies = [
 name = "clove-ui"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "clove-fs",
  "clove-render",
  "clove-search",

@@ -82,12 +82,27 @@ const BAR_H: f32 = 88.0;
 
 // ---------------------------------------------------------------- state
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Location {
+    ThisPc,
+    Folder(PathBuf),
+}
+
 struct State {
-    dir: PathBuf,
+    location: Location,
+    history_back: Vec<Location>,
+    history_forward: Vec<Location>,
     snapshot: Arc<Snapshot>,
     filtered: Vec<usize>,
     query: TextEdit,
-    selected: usize,
+    address: TextEdit,
+    /// Selected entry indices (into the snapshot).
+    selected: std::collections::HashSet<usize>,
+    /// Keyboard cursor position in `filtered` (index into filtered vec).
+    cursor: usize,
+    anchor: Option<usize>,
+    clipboard: Vec<PathBuf>,
+    clipboard_cut: bool,
     status: String,
     loading: bool,
     /// Receipt from the last trash, so Ctrl+Z can put it back.
@@ -111,6 +126,7 @@ struct State {
     storage_ready: bool,
     storage_has_data: bool,
     bar_width: f32,
+    show_hidden: bool,
 }
 
 impl State {
@@ -122,8 +138,26 @@ impl State {
 // ---------------------------------------------------------------- engine glue
 
 fn refilter(s: &mut State) {
-    s.filtered = clove_search::filter(&s.snapshot.entries, &s.query.text);
-    s.selected = s.selected.min(s.filtered.len().saturating_sub(1));
+    let mut idx = clove_search::filter(&s.snapshot.entries, &s.query.text);
+    if !s.show_hidden {
+        idx.retain(|&i| {
+            let e = &s.snapshot.entries[i];
+            !e.hidden && !e.system
+        });
+    }
+    s.filtered = idx;
+    if s.filtered.is_empty() {
+        s.cursor = 0;
+    } else {
+        s.cursor = s.cursor.min(s.filtered.len() - 1);
+    }
+}
+
+fn sync_address(s: &mut State) {
+    match &s.location {
+        Location::ThisPc => s.address.text = "This PC".to_string(),
+        Location::Folder(p) => s.address.text = p.display().to_string(),
+    }
 }
 
 fn rebuild_bar(s: &mut State) {
@@ -168,9 +202,8 @@ fn load_into(
         match result {
             Ok(snapshot) => {
                 s.snapshot = Arc::new(snapshot);
-                s.dir = dir;
-                // A reload triggered by the watcher must not wipe a notice the user is
-                // still reading ("moved … to the Recycle Bin · Ctrl+Z to undo").
+                s.location = Location::Folder(dir);
+                sync_address(s);
                 if s.loading {
                     s.status.clear();
                 }
@@ -186,44 +219,216 @@ fn load_into(
     });
 }
 
-/// Opens `dir`: arms a watcher first (so no change is missed), loads it, then reloads on
-/// every change until the user navigates away.
-fn open_dir(s: &mut State, dir: PathBuf) {
+/// Navigates to `location`: records history, swaps the snapshot, arms a watcher for folders.
+fn navigate(s: &mut State, location: Location) {
+    if location == s.location {
+        return;
+    }
+    s.history_back.push(s.location.clone());
+    s.history_forward.clear();
+
+    s.location = location.clone();
+    sync_address(s);
+    s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), Vec::new()));
+    s.filtered.clear();
+    s.selected.clear();
+    s.cursor = 0;
+    s.anchor = None;
+    s.loading = true;
+    s.status = "loading...".into();
+    s.query.text.clear();
+
     let mine = s.generation.fetch_add(1, Ordering::Relaxed) + 1;
     let generation = s.generation.clone();
     let handle = s.handle.clone();
 
-    s.dir = dir.clone();
-    s.snapshot = Arc::new(Snapshot::new(dir.clone(), Vec::new()));
-    s.filtered.clear();
-    s.selected = 0;
-    s.loading = true;
-    s.status = "loading…".into();
-
-    std::thread::spawn(move || {
-        let watcher = DirWatcher::new(&dir).ok();
-        load_into(&handle, &generation, mine, dir.clone());
-
-        let Some(watcher) = watcher else { return };
-        while generation.load(Ordering::Relaxed) == mine {
-            // A timeout keeps stale threads exiting promptly after navigation.
-            if watcher.recv_timeout(Duration::from_millis(250)).is_some() {
-                load_into(&handle, &generation, mine, dir.clone());
-            }
+    match location {
+        Location::ThisPc => {
+            let entries = this_pc_entries();
+            handle.update(move |s, _| {
+                if generation.load(Ordering::Relaxed) != mine {
+                    return;
+                }
+                s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
+                s.loading = false;
+                s.status.clear();
+                refilter(s);
+            });
         }
-    });
+        Location::Folder(dir) => {
+            std::thread::spawn(move || {
+                let watcher = DirWatcher::new(&dir).ok();
+                load_into(&handle, &generation, mine, dir.clone());
+
+                let Some(watcher) = watcher else { return };
+                while generation.load(Ordering::Relaxed) == mine {
+                    if watcher.recv_timeout(Duration::from_millis(250)).is_some() {
+                        load_into(&handle, &generation, mine, dir.clone());
+                    }
+                }
+            });
+        }
+    }
 }
 
+fn go_back(s: &mut State) {
+    let Some(prev) = s.history_back.pop() else { return };
+    s.history_forward.push(s.location.clone());
+    let target = prev;
+    s.location = target.clone();
+    sync_address(s);
+    s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), Vec::new()));
+    s.filtered.clear();
+    s.selected.clear();
+    s.cursor = 0;
+    s.anchor = None;
+    s.loading = true;
+    s.status = "loading...".into();
+    let mine = s.generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let generation = s.generation.clone();
+    let handle = s.handle.clone();
+    match target {
+        Location::ThisPc => {
+            let entries = this_pc_entries();
+            handle.update(move |s, _| {
+                if generation.load(Ordering::Relaxed) != mine { return; }
+                s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
+                s.loading = false;
+                s.status.clear();
+                refilter(s);
+            });
+        }
+        Location::Folder(dir) => {
+            std::thread::spawn(move || {
+                load_into(&handle, &generation, mine, dir);
+            });
+        }
+    }
+}
+
+fn go_forward(s: &mut State) {
+    let Some(next) = s.history_forward.pop() else { return };
+    s.history_back.push(s.location.clone());
+    let target = next;
+    s.location = target.clone();
+    sync_address(s);
+    s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), Vec::new()));
+    s.filtered.clear();
+    s.selected.clear();
+    s.cursor = 0;
+    s.anchor = None;
+    s.loading = true;
+    s.status = "loading...".into();
+    let mine = s.generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let generation = s.generation.clone();
+    let handle = s.handle.clone();
+    match target {
+        Location::ThisPc => {
+            let entries = this_pc_entries();
+            handle.update(move |s, _| {
+                if generation.load(Ordering::Relaxed) != mine { return; }
+                s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
+                s.loading = false;
+                s.status.clear();
+                refilter(s);
+            });
+        }
+        Location::Folder(dir) => {
+            std::thread::spawn(move || {
+                load_into(&handle, &generation, mine, dir);
+            });
+        }
+    }
+}
+
+fn reload(s: &mut State) {
+    let mine = s.generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let generation = s.generation.clone();
+    let handle = s.handle.clone();
+    match s.location.clone() {
+        Location::ThisPc => {
+            let entries = this_pc_entries();
+            handle.update(move |s, _| {
+                if generation.load(Ordering::Relaxed) != mine { return; }
+                s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
+                s.loading = false;
+                s.status.clear();
+                refilter(s);
+            });
+        }
+        Location::Folder(dir) => {
+            std::thread::spawn(move || {
+                load_into(&handle, &generation, mine, dir);
+            });
+        }
+    }
+}
+
+fn this_pc_entries() -> Vec<Entry> {
+    let mut entries = Vec::new();
+    let home = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_default();
+    let quick = [
+        ("Desktop", home.join("Desktop")),
+        ("Documents", home.join("Documents")),
+        ("Downloads", home.join("Downloads")),
+        ("Pictures", home.join("Pictures")),
+        ("Music", home.join("Music")),
+        ("Videos", home.join("Videos")),
+    ];
+    for (name, path) in quick {
+        if path.exists() {
+            entries.push(Entry::new(name, true, 0));
+        }
+    }
+    #[cfg(windows)]
+    {
+        for i in 0..26u8 {
+            let letter = (b'A' + i) as char;
+            let root = PathBuf::from(format!("{letter}:\\"));
+            if root.exists() {
+                entries.push(Entry::new(format!("{letter}:"), true, 0));
+            }
+        }
+    }
+    entries
+}
+
+fn this_pc_resolve(entry: &Entry) -> Option<PathBuf> {
+    let name = entry.name.as_str();
+    if name.len() == 2 && name.ends_with(':') {
+        let letter = name.chars().next().unwrap();
+        return Some(PathBuf::from(format!("{letter}:\\\\")));
+    }
+    let home = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_default();
+    match name {
+        "Desktop" => Some(home.join("Desktop")),
+        "Documents" => Some(home.join("Documents")),
+        "Downloads" => Some(home.join("Downloads")),
+        "Pictures" => Some(home.join("Pictures")),
+        "Music" => Some(home.join("Music")),
+        "Videos" => Some(home.join("Videos")),
+        _ => None,
+    }
+}
+
+fn entry_path(location: &Location, entry: &Entry) -> Option<PathBuf> {
+    match location {
+        Location::ThisPc => this_pc_resolve(entry),
+        Location::Folder(dir) => Some(dir.join(&entry.name)),
+    }
+}
+
+
 fn delete_selected(s: &mut State) {
-    let Some(&index) = s.filtered.get(s.selected) else {
+    let Location::Folder(root) = s.location.clone() else { return };
+    let Some(&index) = s.filtered.get(s.cursor) else {
         return;
     };
     let entry = s.snapshot.entries[index].clone();
-    let path = s.dir.join(&entry.name);
-    let root = s.dir.clone();
+    let Some(path) = entry_path(&s.location, &entry) else { return };
     let handle = s.handle.clone();
 
-    s.status = format!("moving {} to the Recycle Bin…", entry.name);
+    s.status = format!("moving {} to the Recycle Bin...", entry.name);
     s.wake_bar();
 
     std::thread::spawn(move || {
@@ -238,12 +443,13 @@ fn delete_selected(s: &mut State) {
                 }
                 return;
             }
-            s.status = format!("moved {name} to the Recycle Bin · Ctrl+Z to undo");
+            s.status = format!("moved {name} to the Recycle Bin . Ctrl+Z to undo");
             s.undo = Some(moves);
             s.wake_bar();
         });
     });
 }
+
 
 fn undo_delete(s: &mut State) {
     let Some(moves) = s.undo.take() else {
@@ -264,6 +470,21 @@ fn undo_delete(s: &mut State) {
     });
 }
 
+fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&src_path, &dest_path)?;
+        } else {
+            std::fs::copy(&src_path, &dest_path)?;
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- input
 
 fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
@@ -271,6 +492,130 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     // before the focused filter field turns it into a text undo.
     if ev.is_command('z') {
         undo_delete(s);
+        return true;
+    }
+    // Ctrl+H toggles hidden files.
+    if ev.is_command('h') {
+        s.show_hidden = !s.show_hidden;
+        refilter(s);
+        s.status = if s.show_hidden { "showing hidden files".into() } else { "hidden files hidden".into() };
+        return true;
+    }
+    // Ctrl+C / Ctrl+X: copy/cut selected entries.
+    if ev.is_command('c') || ev.is_command('x') {
+        let cut = ev.is_command('x');
+        let mut paths = Vec::new();
+        for &idx in &s.selected {
+            if let Some(entry) = s.snapshot.entries.get(idx) {
+                if let Some(p) = entry_path(&s.location, entry) {
+                    paths.push(p);
+                }
+            }
+        }
+        if paths.is_empty() {
+            if let Some(&idx) = s.filtered.get(s.cursor) {
+                if let Some(entry) = s.snapshot.entries.get(idx) {
+                    if let Some(p) = entry_path(&s.location, entry) {
+                        paths.push(p);
+                    }
+                }
+            }
+        }
+        if !paths.is_empty() {
+            s.clipboard = paths.clone();
+            s.clipboard_cut = cut;
+            let paths2 = paths.clone();
+            std::thread::spawn(move || {
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    let _ = cb.set().file_list(&paths2);
+                }
+            });
+            s.status = format!("{} {} item(s)", if cut { "cut" } else { "copied" }, paths.len());
+        }
+        return true;
+    }
+    // Ctrl+V: paste.
+    if ev.is_command('v') {
+        let target = match &s.location {
+            Location::Folder(d) => d.clone(),
+            _ => {
+                s.status = "paste not supported here".into();
+                return true;
+            }
+        };
+        let mut paths = s.clipboard.clone();
+        if paths.is_empty() {
+            if let Ok(mut cb) = arboard::Clipboard::new() {
+                if let Ok(fl) = cb.get().file_list() {
+                    paths = fl;
+                    s.clipboard_cut = false;
+                }
+            }
+        }
+        if paths.is_empty() {
+            s.status = "clipboard empty".into();
+            return true;
+        }
+        let cut = s.clipboard_cut;
+        let handle = s.handle.clone();
+        s.status = "pasting...".into();
+        std::thread::spawn(move || {
+            let mut moved = 0usize;
+            let mut skipped = 0usize;
+            let mut failures = 0usize;
+            for src in &paths {
+                let Some(name) = src.file_name() else { failures += 1; continue; };
+                let dest = target.join(name);
+                if dest.exists() {
+                    skipped += 1;
+                    continue;
+                }
+                let res = if src.is_dir() {
+                    if cut {
+                        std::fs::rename(src, &dest).or_else(|_| { copy_dir(src, &dest).and_then(|_| std::fs::remove_dir_all(src)) })
+                    } else {
+                        copy_dir(src, &dest)
+                    }
+                } else if cut {
+                    std::fs::rename(src, &dest).or_else(|_| { std::fs::copy(src, &dest).and_then(|_| std::fs::remove_file(src)) })
+                } else {
+                    std::fs::copy(src, &dest).map(|_| ())
+                };
+                if res.is_ok() { moved += 1; } else { failures += 1; }
+            }
+            if cut {
+                // clear internal clipboard after successful cut
+            }
+            handle.update(move |s, _| {
+                s.status = format!("pasted {} · skipped {} · failed {}", moved, skipped, failures);
+                s.wake_bar();
+                // refresh listing
+                reload(s);
+            });
+        });
+        return true;
+    }
+    // Ctrl+Shift+N: new folder.
+    if ev.is_command('n') && ev.mods.shift {
+        if let Location::Folder(root) = s.location.clone() {
+            let handle = s.handle.clone();
+            s.status = "creating folder...".into();
+            std::thread::spawn(move || {
+                let mut name = "New folder".to_string();
+                let mut dest = root.join(&name);
+                let mut i = 2;
+                while dest.exists() {
+                    name = format!("New folder ({})", i);
+                    dest = root.join(&name);
+                    i += 1;
+                }
+                let _ = std::fs::create_dir(&dest);
+                handle.update(move |s, _| {
+                    s.status = format!("created {}", name);
+                    reload(s);
+                });
+            });
+        }
         return true;
     }
     // Ctrl+R (Cmd+R) re-measures the disk.
@@ -293,40 +638,99 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     let n = s.filtered.len();
     match ev.key {
         Key::Down if n > 0 => {
-            s.selected = (s.selected + 1).min(n - 1);
+            s.cursor = (s.cursor + 1).min(n - 1);
+            if ev.mods.shift {
+                if let Some(&idx) = s.filtered.get(s.cursor) { s.selected.insert(idx); }
+            } else {
+                s.selected.clear();
+                if let Some(&idx) = s.filtered.get(s.cursor) { s.selected.insert(idx); }
+            }
             true
         }
         Key::Up => {
-            s.selected = s.selected.saturating_sub(1);
+            s.cursor = s.cursor.saturating_sub(1);
+            if n > 0 {
+                if ev.mods.shift {
+                    if let Some(&idx) = s.filtered.get(s.cursor) { s.selected.insert(idx); }
+                } else {
+                    s.selected.clear();
+                    if let Some(&idx) = s.filtered.get(s.cursor) { s.selected.insert(idx); }
+                }
+            }
             true
         }
         Key::Home if n > 0 => {
-            s.selected = 0;
+            s.cursor = 0;
+            s.selected.clear();
+            if let Some(&idx) = s.filtered.get(0) { s.selected.insert(idx); }
             true
         }
         Key::End if n > 0 => {
-            s.selected = n - 1;
+            s.cursor = n - 1;
+            s.selected.clear();
+            if let Some(&idx) = s.filtered.get(n - 1) { s.selected.insert(idx); }
             true
         }
         Key::Enter => {
-            if let Some(&index) = s.filtered.get(s.selected) {
+            if let Some(&index) = s.filtered.get(s.cursor) {
                 if s.snapshot.entries[index].is_dir {
-                    let path = s.dir.join(&s.snapshot.entries[index].name);
-                    open_dir(s, path);
-                    return true;
+                    if let Some(path) = entry_path(&s.location, &s.snapshot.entries[index]) {
+                        navigate(s, Location::Folder(path));
+                        sync_address(s);
+                        return true;
+                    }
                 }
             }
             false
         }
         Key::Backspace if s.query.text.is_empty() => {
-            if let Some(parent) = s.dir.parent().map(Path::to_path_buf) {
-                open_dir(s, parent);
-                return true;
+            match &s.location {
+                Location::Folder(dir) => {
+                    if let Some(parent) = dir.parent().map(Path::to_path_buf) {
+                        navigate(s, Location::Folder(parent));
+                        sync_address(s);
+                        return true;
+                    }
+                    // at drive root -> This PC
+                    navigate(s, Location::ThisPc);
+                    sync_address(s);
+                    return true;
+                }
+                Location::ThisPc => false,
             }
-            false
         }
         Key::Delete => {
-            delete_selected(s);
+            if ev.mods.shift {
+                // permanent delete
+                let mut paths = Vec::new();
+                for &idx in &s.selected {
+                    if let Some(entry) = s.snapshot.entries.get(idx) {
+                        if let Some(p) = entry_path(&s.location, entry) { paths.push(p); }
+                    }
+                }
+                if paths.is_empty() {
+                    if let Some(&idx) = s.filtered.get(s.cursor) {
+                        if let Some(entry) = s.snapshot.entries.get(idx) {
+                            if let Some(p) = entry_path(&s.location, entry) { paths.push(p); }
+                        }
+                    }
+                }
+                let handle = s.handle.clone();
+                s.status = "deleting permanently...".into();
+                std::thread::spawn(move || {
+                    let mut done = 0usize; let mut fail = 0usize;
+                    for p in &paths {
+                        let res = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+                        if res.is_ok() { done += 1; } else { fail += 1; }
+                    }
+                    handle.update(move |s, _| {
+                        s.status = format!("deleted {} · {} failed", done, fail);
+                        reload(s);
+                    });
+                });
+            } else {
+                delete_selected(s);
+            }
             true
         }
         Key::Escape => {
@@ -340,6 +744,28 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         }
         _ => false,
     }
+}
+
+fn handle_address_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    if ev.key == Key::Enter {
+        let text = s.address.text.trim().to_string();
+        if text.eq_ignore_ascii_case("This PC") || text.is_empty() {
+            navigate(s, Location::ThisPc);
+            sync_address(s);
+            return true;
+        }
+        let path = PathBuf::from(&text);
+        if path.exists() {
+            if path.is_dir() {
+                navigate(s, Location::Folder(path));
+                sync_address(s);
+                return true;
+            }
+        }
+        s.status = format!("not found: {text}");
+        return true;
+    }
+    false
 }
 
 // ---------------------------------------------------------------- bar animation
@@ -500,7 +926,7 @@ fn format_size(size: u64) -> String {
 
 fn row_el(s: &State, index: usize) -> El {
     let entry: &Entry = &s.snapshot.entries[index];
-    let selected = index == s.selected;
+    let selected = s.selected.contains(&index);
     row()
         .key(format!("row-{index}"))
         .h(ROW_H)
@@ -529,6 +955,50 @@ fn row_el(s: &State, index: usize) -> El {
         )
 }
 
+fn location_label(loc: &Location) -> String {
+    match loc {
+        Location::ThisPc => "This PC".to_string(),
+        Location::Folder(p) => p.display().to_string(),
+    }
+}
+
+fn breadcrumbs_el(s: &State) -> El {
+    let mut row = row().key("breadcrumbs").w_full().h(20.0).gap(4.0).center_y();
+    let this_pc_color = if matches!(s.location, Location::ThisPc) { ink() } else { ink_secondary() };
+    row = row.child(
+        el()
+            .key("bc-thispc")
+            .radius(tokens::RADIUS_CONTROL)
+            .px(6.0)
+            .child(text("This PC").font(type_::LABEL).color(this_pc_color))
+            .on_press(|s: &mut State| { navigate(s, Location::ThisPc); sync_address(s); }),
+    );
+    if let Location::Folder(path) = &s.location {
+        let mut acc = PathBuf::new();
+        for comp in path.components() {
+            acc.push(comp);
+            let label = comp.as_os_str().to_string_lossy().to_string();
+            if label.is_empty() || label == "\\" || label == "/" {
+                continue;
+            }
+            let target = acc.clone();
+            let color = ink_secondary();
+            row = row.child(
+                el()
+                    .key(format!("bc-{}", label))
+                    .radius(tokens::RADIUS_CONTROL)
+                    .px(6.0)
+                    .child(text(label).font(type_::LABEL).color(color))
+                    .on_press(move |s: &mut State| {
+                        navigate(s, Location::Folder(target.clone()));
+                        sync_address(s);
+                    }),
+            );
+        }
+    }
+    row
+}
+
 fn view(s: &State, _: &mut Cx<State>) -> El {
     let count = s.filtered.len();
     let total = s.snapshot.len();
@@ -540,17 +1010,78 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
         .fill(bg())
         .padding(12.0)
         .gap(8.0)
-        // Path + status.
+        // Toolbar: Back / Forward / Up + address bar.
+        .child(
+            row()
+                .key("toolbar")
+                .w_full()
+                .h(32.0)
+                .gap(6.0)
+                .center_y()
+                .child(
+                    el()
+                        .key("btn-back")
+                        .w(28.0).h(28.0)
+                        .radius(tokens::RADIUS_CONTROL)
+                        .fill(surface())
+                        .center()
+                        .child(text("◀").font(type_::BODY).color(if s.history_back.is_empty() { ink_secondary() } else { ink() }))
+                        .on_press(|s: &mut State| { go_back(s); sync_address(s); }),
+                )
+                .child(
+                    el()
+                        .key("btn-fwd")
+                        .w(28.0).h(28.0)
+                        .radius(tokens::RADIUS_CONTROL)
+                        .fill(surface())
+                        .center()
+                        .child(text("▶").font(type_::BODY).color(if s.history_forward.is_empty() { ink_secondary() } else { ink() }))
+                        .on_press(|s: &mut State| { go_forward(s); sync_address(s); }),
+                )
+                .child(
+                    el()
+                        .key("btn-up")
+                        .w(28.0).h(28.0)
+                        .radius(tokens::RADIUS_CONTROL)
+                        .fill(surface())
+                        .center()
+                        .child(text("↑").font(type_::BODY).color(ink()))
+                        .on_press(|s: &mut State| {
+                            if let Location::Folder(dir) = s.location.clone() {
+                                if let Some(parent) = dir.parent().map(Path::to_path_buf) {
+                                    navigate(s, Location::Folder(parent));
+                                } else {
+                                    navigate(s, Location::ThisPc);
+                                }
+                                sync_address(s);
+                            }
+                        }),
+                )
+                .child(
+                    text_input(&s.address, type_::BODY)
+                        .key("address")
+                        .label("Address")
+                        .single_line()
+                        .grow(1.0)
+                        .color(ink())
+                        .placeholder("This PC", ink_secondary())
+                        .on_edit(|s: &mut State| &mut s.address)
+                        .on_input_key(handle_address_key),
+                ),
+        )
+        // Breadcrumbs.
+        .child(breadcrumbs_el(s))
+        // Location title + status.
         .child(
             row()
                 .key("header")
                 .w_full()
-                .h(24.0)
+                .h(20.0)
                 .center_y()
                 .child(
-                    text(s.dir.display().to_string())
+                    text(location_label(&s.location))
                         .key("path")
-                        .font(type_::BODY)
+                        .font(type_::TITLE)
                         .color(ink())
                         .grow(1.0),
                 )
@@ -630,6 +1161,30 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                         ),
                 ),
         )
+        // Status bar.
+        .child(
+            row()
+                .key("statusbar")
+                .w_full()
+                .h(20.0)
+                .center_y()
+                .child(
+                    text(if count == 0 {
+                        "0 items".to_string()
+                    } else {
+                        format!("{count} of {total} items")
+                    })
+                    .key("status-count")
+                    .font(type_::LABEL)
+                    .color(ink_secondary())
+                    .grow(1.0),
+                )
+                .child(
+                    text(if s.show_hidden { "hidden: on" } else { "" })
+                        .font(type_::LABEL)
+                        .color(ink_secondary()),
+                ),
+        )
 }
 
 // ---------------------------------------------------------------- main
@@ -689,7 +1244,7 @@ fn start_dir() -> PathBuf {
 }
 
 fn build_state(handle: AppHandle<State>) -> State {
-    let dir = start_dir();
+    let location = Location::ThisPc;
 
     let cached = load_storage_cache();
     let (storage_bytes, storage_capacity, storage_used, storage_has_data, storage_ready, scan_started) =
@@ -729,14 +1284,28 @@ fn build_state(handle: AppHandle<State>) -> State {
     let bar = Pixels::new();
     bar.set(w as u32, h as u32, bar_renderer.buffer().to_vec());
 
+    let pc_entries = this_pc_entries();
+    let filtered: Vec<usize> = (0..pc_entries.len()).collect();
+    let mut selected = std::collections::HashSet::new();
+    if let Some(&i) = filtered.first() {
+        selected.insert(i);
+    }
+
     State {
-        dir: dir.clone(),
-        snapshot: Arc::new(Snapshot::new(dir, Vec::new())),
-        filtered: Vec::new(),
+        location,
+        history_back: Vec::new(),
+        history_forward: Vec::new(),
+        snapshot: Arc::new(Snapshot::new(PathBuf::new(), pc_entries)),
+        filtered,
         query: TextEdit::new(""),
-        selected: 0,
-        status: "loading…".into(),
-        loading: true,
+        address: TextEdit::new("This PC"),
+        selected,
+        cursor: 0,
+        anchor: None,
+        clipboard: Vec::new(),
+        clipboard_cut: false,
+        status: String::new(),
+        loading: false,
         undo: None,
         bar,
         bar_renderer,
@@ -753,6 +1322,7 @@ fn build_state(handle: AppHandle<State>) -> State {
         storage_ready,
         storage_has_data,
         bar_width: 936.0,
+        show_hidden: false,
     }
 }
 
@@ -769,10 +1339,14 @@ fn main() {
     });
 
     let boot = app.handle();
-    std::thread::spawn(move || {
-        let dir = start_dir();
-        boot.update(move |s, _| open_dir(s, dir));
-    });
+    if let Ok(dir) = std::env::var("CLOVE_START_DIR") {
+        let dir = PathBuf::from(dir);
+        std::thread::spawn(move || {
+            boot.update(move |s, _| {
+                navigate(s, Location::Folder(dir));
+            });
+        });
+    }
 
     app.run();
 }
