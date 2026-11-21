@@ -109,6 +109,7 @@ struct State {
     scan: Option<StorageScan>,
     scan_started: bool,
     storage_ready: bool,
+    storage_has_data: bool,
     bar_width: f32,
 }
 
@@ -126,7 +127,7 @@ fn refilter(s: &mut State) {
 }
 
 fn rebuild_bar(s: &mut State) {
-    let spec = if s.storage_ready {
+    let spec = if s.storage_has_data {
         let total: u64 = s.storage_bytes.iter().sum();
         let capacity = if s.storage_capacity > 0 {
             s.storage_capacity
@@ -272,6 +273,23 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         undo_delete(s);
         return true;
     }
+    // Ctrl+R (Cmd+R) re-measures the disk.
+    if ev.is_command('r') {
+        if let Some(path) = storage_cache_path() {
+            let _ = std::fs::remove_file(path);
+        }
+        s.storage_bytes = [0; KIND_COUNT];
+        s.storage_capacity = 0;
+        s.storage_used = 0;
+        s.storage_ready = false;
+        s.storage_has_data = false;
+        s.scan = None;
+        s.scan_started = false;
+        s.status = "measuring disk…".into();
+        s.wake_bar();
+        rebuild_bar(s);
+        return true;
+    }
     let n = s.filtered.len();
     match ev.key {
         Key::Down if n > 0 => {
@@ -353,6 +371,7 @@ fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
 
     let mut changed = false;
     let mut finished = false;
+    let mut new_done = false;
     if let Some(scan) = &s.scan {
         while let Some(event) = scan.try_recv() {
             match event {
@@ -361,10 +380,16 @@ fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
                 }
                 ScanEvent::Done(report) => {
                     s.storage_bytes[report.kind.index()] = report.bytes;
+                    new_done = true;
                 }
                 ScanEvent::Finished => finished = true,
             }
         }
+    }
+    if new_done {
+        s.storage_has_data = true;
+        rebuild_bar(s);
+        changed = true;
     }
     if finished {
         s.scan = None;
@@ -377,8 +402,14 @@ fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
             .sum();
         s.storage_bytes[StorageKind::System.index()] = s.storage_used.saturating_sub(counted);
         s.storage_ready = true;
+        s.storage_has_data = true;
         rebuild_bar(s);
         changed = true;
+        // Persist for the 30-minute cache so the next launch skips the walk.
+        let bytes = s.storage_bytes;
+        let capacity = s.storage_capacity;
+        let used = s.storage_used;
+        std::thread::spawn(move || save_storage_cache(bytes, capacity, used));
     } else if s.scan.is_some() {
         tx.wake_after(Duration::from_millis(100));
     }
@@ -402,6 +433,55 @@ fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
 }
 
 // ---------------------------------------------------------------- view
+
+fn human_gb(bytes: u64) -> String {
+    if bytes >= 1_000_000_000_000 {
+        format!("{:.1} TB", bytes as f64 / 1e12)
+    } else {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    }
+}
+
+fn color_f32(rgb: [f32; 3], a: f32) -> Color {
+    Color {
+        r: srgb_to_linear(rgb[0]),
+        g: srgb_to_linear(rgb[1]),
+        b: srgb_to_linear(rgb[2]),
+        a,
+    }
+}
+
+fn legend_el(s: &State) -> El {
+    let mut legend = row()
+        .key("legend")
+        .w_full()
+        .h(20.0)
+        .gap(12.0)
+        .center_y();
+    for k in 0..KIND_COUNT {
+        let bytes = s.storage_bytes[k];
+        let label = if s.storage_has_data {
+            format!("{} {}", tokens::STORAGE_KIND_NAMES[k], human_gb(bytes))
+        } else {
+            tokens::STORAGE_KIND_NAMES[k].to_string()
+        };
+        legend = legend.child(
+            row()
+                .key(format!("legend-{k}"))
+                .gap(4.0)
+                .center_y()
+                .child(
+                    el()
+                        .w(8.0)
+                        .h(8.0)
+                        .radius(2.0)
+                        .fill(color_f32(tokens::STORAGE_KIND_RGB[k], 1.0)),
+                )
+                .child(text(label).font(type_::LABEL).color(ink_secondary())),
+        );
+    }
+    legend
+}
 
 fn format_size(size: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -503,6 +583,8 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                 })
                 .pixels_fit(&s.bar, rune::SurfaceFit::Fill),
         )
+        // Kind legend under the bar.
+        .child(legend_el(s))
         // Filter field.
         .child(
             row()
@@ -552,20 +634,95 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 
 // ---------------------------------------------------------------- main
 
+fn storage_cache_path() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|p| p.join("Clove").join("storage-scan.txt"))
+}
+
+fn load_storage_cache() -> Option<([u64; KIND_COUNT], u64, u64)> {
+    let path = storage_cache_path()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut parts = text.trim().split(',');
+    let scanned_at: u64 = parts.next()?.parse().ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if now.saturating_sub(scanned_at) > 30 * 60 {
+        return None;
+    }
+    let capacity: u64 = parts.next()?.parse().ok()?;
+    let used: u64 = parts.next()?.parse().ok()?;
+    let mut bytes = [0u64; KIND_COUNT];
+    for slot in bytes.iter_mut() {
+        *slot = parts.next()?.parse().ok()?;
+    }
+    Some((bytes, capacity, used))
+}
+
+fn save_storage_cache(bytes: [u64; KIND_COUNT], capacity: u64, used: u64) {
+    let Some(path) = storage_cache_path() else { return };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut line = format!("{now},{capacity},{used}");
+    for b in bytes {
+        line.push_str(&format!(",{b}"));
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, line);
+}
+
 fn start_dir() -> PathBuf {
     // `CLOVE_START_DIR` lets a headless `--script` run open a sandbox directory, which is how
     // the filter/trash/undo paths are exercised without a window.
-    std::env::var("CLOVE_START_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("C:\\"))
+    if let Ok(dir) = std::env::var("CLOVE_START_DIR") {
+        return PathBuf::from(dir);
+    }
+    // A file manager opens on the main drive, not the user's profile.
+    let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+    PathBuf::from(format!("{}\\", drive.trim_end_matches('\\')))
 }
 
 fn build_state(handle: AppHandle<State>) -> State {
     let dir = start_dir();
 
-    let spec = BarSpec::placeholder(936.0).with_height(BAR_H);
+    let cached = load_storage_cache();
+    let (storage_bytes, storage_capacity, storage_used, storage_has_data, storage_ready, scan_started) =
+        if let Some((bytes, capacity, used)) = cached {
+            (
+                bytes,
+                capacity,
+                used,
+                true,
+                true,
+                true, // skip the scan
+            )
+        } else {
+            ([0u64; KIND_COUNT], 0, 0, false, false, false)
+        };
+
+    let spec = if storage_has_data {
+        // Build from cached numbers immediately.
+        let total: u64 = storage_bytes.iter().sum();
+        let capacity = if storage_capacity > 0 {
+            storage_capacity
+        } else {
+            total.max(1)
+        };
+        let segments = storage_bytes
+            .iter()
+            .enumerate()
+            .map(|(kind, &bytes)| Segment::kind(kind, bytes as f32 / capacity as f32))
+            .collect();
+        BarSpec::new(936.0, segments).with_height(BAR_H)
+    } else {
+        BarSpec::placeholder(936.0).with_height(BAR_H)
+    };
     let mut bar_renderer = BarRenderer::new(spec);
     bar_renderer.render(0.0);
     let (w, h) = bar_renderer.size();
@@ -588,12 +745,13 @@ fn build_state(handle: AppHandle<State>) -> State {
         focus_attempts: 0,
         generation: Arc::new(AtomicU64::new(0)),
         handle,
-        storage_bytes: [0; KIND_COUNT],
-        storage_capacity: 0,
-        storage_used: 0,
+        storage_bytes,
+        storage_capacity,
+        storage_used,
         scan: None,
-        scan_started: false,
-        storage_ready: false,
+        scan_started,
+        storage_ready,
+        storage_has_data,
         bar_width: 936.0,
     }
 }
