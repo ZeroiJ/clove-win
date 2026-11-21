@@ -1311,6 +1311,28 @@ fn breadcrumbs_el(s: &State) -> El {
     row
 }
 
+fn colhdr_item(label: &'static str, field: u8, s: &State) -> El {
+    let active = s.sort_by == field;
+    let arrow = if active { if s.sort_desc { " ↓" } else { " ↑" } } else { "" };
+    el()
+        .key(format!("colhdr-{field}"))
+        .grow(if field == 0 { 1.0 } else { 0.0 })
+        .w(if field == 0 { 0.0 } else { 80.0 })
+        .h(20.0)
+        .center_y()
+        .child(text(format!("{}{}", label, arrow)).font(type_::LABEL).color(if active { ink() } else { ink_secondary() }))
+        .on_press(move |st: &mut State| {
+            if st.sort_by == field {
+                st.sort_desc = !st.sort_desc;
+            } else {
+                st.sort_by = field;
+                st.sort_desc = false;
+            }
+            refilter(st);
+            save_settings(st);
+        })
+}
+
 fn ctx_item(label: &'static str, on: impl Fn(&mut State) + 'static) -> El {
     let on = std::rc::Rc::new(on);
     let on2 = on.clone();
@@ -1516,6 +1538,22 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                 )
         } else {
             col().key("search-off").w_full().h(0.0)
+        })
+        // Column headers (Details view).
+        .child(if s.view_mode == 0 {
+            row()
+                .key("colhdr")
+                .w_full()
+                .h(20.0)
+                .px(8.0)
+                .center_y()
+                .gap(8.0)
+                .child(colhdr_item("Name", 0, s))
+                .child(colhdr_item("Size", 1, s))
+                .child(colhdr_item("Type", 2, s))
+                .child(colhdr_item("Modified", 3, s))
+        } else {
+            row().key("colhdr-off").w_full().h(0.0)
         })
         // Virtualized listing: only mounted rows build.
         .child(
