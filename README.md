@@ -1,160 +1,92 @@
 <div align="center">
 
-<img src="Clove/Assets.xcassets/AppIcon.appiconset/icon_128x128@2x.png" alt="" width="96" />
+# Clove for Windows
 
-# Clove
+**A fast, standalone file manager for Windows 11, written in Rust.**
 
-**Everything your AI agents load, in one native Mac app.**
+Inspired by [Clove](https://github.com/keshav-exe/clove) — the native macOS app I loved but couldn't run because I don't own a Mac. So I ported the idea to Windows 11 and remade the whole thing from scratch in Rust: a single, self-contained `clove.exe` with no runtime dependencies.
 
-Skills, instruction files, rules, commands, subagents, MCP servers, hooks, permissions, and the API keys they need, across Claude Code, Cursor, and Codex. Find new skills on [skills.sh](https://skills.sh), see what each agent is set up with, clean out what you don't use, and see what's filling your disk.
-
-```bash
-curl -fsSL https://github.com/keshav-exe/clove/releases/latest/download/install.sh | bash
-```
-
-[**Download for Mac**](https://github.com/keshav-exe/clove/releases/latest) · [Website](https://clove.kshv.me) · [What's new in 3.2](https://github.com/keshav-exe/clove/releases/tag/v3.2)
-
-Open source · MIT · Lifetime license for the signed app · No account · macOS 26
-
-<img src="docs/screenshots/framed/home.png" alt="Clove's Home: what needs a look, and cards for skills, running agents, cleanup, and context" />
+[**Download the latest .exe**](https://github.com/ZeroiJ/clove-win/releases/latest) · [Build from source](#build-from-source)
 
 </div>
 
-## Home
+## What it is
 
-One page with what needs a look right now: skills you never use, leftovers agents downloaded and forgot, old session history, keys sitting in plain text. Trending skills from skills.sh sit beside it, one click from their page.
+Clove for Windows is a file manager. It browses your drives and folders, lets you filter, open, and delete files, and shows your disk usage as a live, dithered storage bar broken down by kind — apps, code, photos, movies, documents, music, system, caches, and the trash.
 
-## Quick access panel
+It started as a port of Clove's storage view and file browsing to Windows, and grew into a full standalone file manager. Everything runs on background threads; an idle window draws nothing.
 
-<img src="docs/product-preview.png" alt="Clove quick access panel searching agent skills" width="420" align="right" />
+## Features
 
-Skills live in `~/.cursor`, `~/.claude`, plugins, and project folders. Clove finds every `SKILL.md` on your Mac, including skills linked in from a dotfiles repo, and puts them one shortcut away.
+- **File browsing** — virtualized list, background directory loads, live reloads via `ReadDirectoryChangesW`, keyboard navigation (↑↓, Home/End, Enter to open, Backspace to go up).
+- **Filter** — type to filter by name; pre-folded names make it sub-millisecond on thousands of entries.
+- **Storage bar** — Clove's signature dithered bar, ported byte-for-byte (Bayer 4×4, value noise, glints, dirty-rect repaint, settle-stop). It animates for ~1.5 s after an action, then the window idles at 0 % CPU.
+- **Real disk scan** — measures the disk by kind on three worker threads; the bar fills in as kinds finish. Results are cached for 30 minutes so relaunches are instant.
+- **Trash** — Delete moves to the Recycle Bin with an exact receipt; Ctrl+Z puts it back. Guarded so a path can never escape its folder.
+- **Standalone** — one `clove.exe`, ~19 MB, no installer, no runtime, no account. DirectX 12 GPU only.
 
-- Search names, descriptions, and groups
-- Copy prompt-ready references like `/animations` or `@nextjs`, not file paths
-- Pin the panel beside your editor (`⌘⇧K`), or drag a skill straight into a prompt
-- Group skills and copy a whole stack at once
+## Keyboard
 
-<br clear="right" />
+| Key | Action |
+|---|---|
+| Type | Filter files by name |
+| ↑ / ↓ | Move selection |
+| Home / End | First / last |
+| Enter | Open folder |
+| Backspace | Go up |
+| Delete | Move to Recycle Bin |
+| Ctrl+Z | Undo last trash |
+| Ctrl+R | Rescan the disk |
+| Esc | Clear filter |
 
-## Discover
+## Download
 
-<img src="docs/screenshots/framed/discover.png" alt="A skill from skills.sh with its installs, stars, security audits, highlights, and SKILL.md" />
-
-- Browse the skills.sh Top, Trending, and Hot lists, or search all of them
-- Read a skill's SKILL.md, highlights, and security audits before installing
-- Install in one click, everywhere or into one project. Clove puts one copy in `.agents/skills` and links it into the agents you pick, the same layout as `npx skills add`
-- Check installed skills for updates and update them in place
-
-## Context and tools
-
-- **Instruction files:** `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, and Copilot instructions, globally and per project, with what each costs in context. Point several agents at one file and edit it once
-- **Rules:** Cursor rules (`.cursor/rules/*.mdc`, `.cursorrules`), Windsurf rules, and Copilot instruction files, with when each applies
-- **Commands and subagents** for Claude Code, Cursor, and Codex. Share one with another agent and Clove links it, so edits reach both
-- **MCP servers** from Claude Code, Cursor, Codex, Gemini, Claude Desktop, and Windsurf. Add one to another agent in a click. Environment variables and headers show names only
-- **Hooks** from Claude Code, Cursor, and Codex, with a warning when a hook's script is missing
-- **Permissions:** Claude Code's allow and deny rules per project
-
-## Secrets
-
-- Keep API keys in your login Keychain instead of `~/.zshenv`
-- Clove finds keys exported in plain text from your shell profiles and moves them, rewriting each line to read from the Keychain
-- Copy a shell line or an MCP-safe command for any key. macOS asks before handing it to anything but Clove
-
-## Running
-
-<img src="docs/screenshots/framed/running.png" alt="Running agent sessions and MCP servers, with the folder, memory, and command for each" />
-
-Live agent sessions, the MCP servers they start, and the dev servers they leave behind. See what started each one, where it runs, and how much memory it holds. Stop the ones you're done with.
-
-Your Docker containers are listed here too, from Docker Desktop, OrbStack, Colima, or Rancher Desktop. Start, stop, or restart one, or open it in your browser.
-
-## Cleanup
-
-<img src="docs/screenshots/framed/cleanup.png" alt="Cleanup listing unused skills and the tokens they cost every session" />
-
-- See which skills, commands, and subagents your agents haven't used in 30 days, 90 days, or 6 months, read from Claude Code, Codex, and Cursor history on your Mac
-- See what they cost: every installed skill's description loads into each agent session
-- Find leftovers like old Chrome for Testing builds, idle `npx` installs, and unused Claude Code versions
-- Move it all to the Trash in one click, with undo
-
-## Storage
-
-<img src="docs/screenshots/framed/storage.png" alt="Storage: the disk as a dithered bar by kind, with Developer called out and the biggest folders listed below" />
-
-Your disk as a live, dithered bar: apps, code and toolchains, photos, movies, documents, music, system data, caches, and the Trash, each in its own colour.
-
-- Rest on a part to see what's in it, like old simulators, `node_modules`, or agent history under Developer; click it to list its biggest items
-- Clear caches in one step. They go to the Trash first, and Recently cleared puts any of it back until you empty the Trash. Caches for open apps and for macOS itself are left alone
-- Mark a folder Always Keep and it's never cleared or suggested again, in any future scan. Skills and commands in Cleanup work the same way
-- Empty the Trash, or move a big folder there from the list. Everything asks first, and whole agent folders like `~/.claude` are never offered
-- Scans run at low priority, a finished scan is remembered for 30 minutes, and the bar stops animating once it settles
-
-## Menu bar panel
-
-Pick the blocks your menu bar panel holds: Skills, Storage, Running, Cleanup, and Trending. Their tiles sit along the bottom of the panel, `⌘1` to `⌘5` switch between them, and Settings → General lists them too. The Storage block is the same live bar, at panel width. Right-click the menu bar icon for every section, with the panel shortcut shown the native way.
-
-To see a number at a glance, Settings → General → Beside the icon shows free space, dev servers, all servers, or containers next to the icon.
-
-## Write
-
-- Edit any SKILL.md with a live preview and checks against the Agent Skills format (`⌘E`)
-- Start a new skill from a guide, workflow, or review template (`⌘N`)
-
-## Install
-
-Needs macOS 26 or later, on Apple silicon or Intel.
-
-From Terminal:
-
-```bash
-curl -fsSL https://github.com/keshav-exe/clove/releases/latest/download/install.sh | bash
-```
-
-The script downloads the latest release and checks it against the release's checksums, Clove's Developer ID team, and Apple's notarization before it copies anything into Applications. After that, Clove updates itself. Add `bash -s -- --version 3.0` to pin a version, or `bash -s -- --uninstall` to remove the app (settings and groups stay).
-
-Or download `Clove-<version>.dmg` from [Releases](https://github.com/keshav-exe/clove/releases/latest), open it, and drag Clove to Applications. Releases are signed and notarized, so it opens like any other app.
-
-The signed app asks for a license key the first time it opens: one lifetime purchase from [clove.kshv.me](https://clove.kshv.me), for one Mac at a time. Building from source doesn't need one.
+Grab `clove.exe` from the [latest release](https://github.com/ZeroiJ/clove-win/releases/latest). Windows SmartScreen may warn about an unsigned binary — click **More info → Run anyway**.
 
 ## Build from source
 
-```bash
-git clone git@github.com:keshav-exe/clove.git
-cd clove
-open Clove.xcodeproj
-```
-
-Or from the command line:
+Needs Rust 1.99+ (MSVC) and the pinned Rune checkout.
 
 ```bash
-xcodebuild -scheme Clove -configuration Release -destination 'platform=macOS' build
+git clone https://github.com/ZeroiJ/clove-win.git
+cd clove-win
+# fetch the Rune upstream checkout (git-ignored, required to build)
+git clone --depth 1 https://github.com/rune-rs/rune.git prototypes/_rune-upstream
+# (pin to the rev recorded in clove-rs/Cargo.toml)
+
+cd clove-rs
+cargo build -p clove-ui --release
+# binary: clove-rs/target/release/clove.exe
 ```
 
-Xcode 26 and the macOS 26 SDK. Builds from source skip the license check, so they're free to use.
-
-To ship a release from a Mac with the Developer ID certificate:
+Headless engine tests:
 
 ```bash
-./tools/release.sh 3.2 docs/release-notes/3.2.md
+cd clove-rs
+cargo test -p clove-fs -p clove-search -p clove-render -p clove-shell
+cargo run -p clove-cli -- scan
 ```
 
-It bumps the version, builds and signs the app, notarizes the `.dmg`, tags the version, and publishes the GitHub release with the `.dmg`, `checksums.txt`, and `install.sh` attached, which is what the `curl` line above fetches. It needs `gh`, `create-dmg`, and a notary profile saved with `xcrun notarytool store-credentials AC_PASSWORD`.
+## Project layout
 
-## Privacy
-
-Skills never leave your Mac. Cleanup reads agent transcripts on your Mac only to find skill names, and keeps nothing but those names and dates. Clove changes skill files only when you install, edit, or remove one, and anything it replaces goes to the Trash. Groups are saved in one JSON file inside Application Support. Storage keeps its last scan, sizes and the names of your biggest folders, in a file only you can read inside Clove's own cache folder, left out of backups. It deletes only when you clear caches or empty the Trash, and checks each path at the moment it deletes.
-
-Clove shares `~/.agents/.skill-lock.json` with the [skills CLI](https://github.com/vercel-labs/skills), so skills installed either way show where they came from and can be updated by both.
-
-Network calls: skills.sh and GitHub while you use Discover or install and update a skill, optional app update checks, and a license check once a week for the signed app. Installing from Clove sends no telemetry, so those installs don't count toward the skills.sh leaderboard. No analytics. No account.
+```
+clove-rs/
+  crates/
+    clove-fs/      filesystem engine: listing, folded names, watching, storage scan
+    clove-search/  fuzzy filter (pre-folded names)
+    clove-render/  dithered storage bar + design tokens (UI-free)
+    clove-shell/   trash/restore safety with Recycle Bin receipts
+    clove-cli/     headless test surface: list, find, bar, bench, scan
+    clove-ui/      the Rune app (the only crate that names a UI framework)
+docs/rust-port/    architecture, framework comparison, roadmap, phase reports
+Clove/             original macOS app (reference)
+```
 
 ## Credits
 
-Several 2.0 features came from [Ram (@ramxcodes)](https://x.com/ramxcodes/status/2113292890294423802): installing skills into one project, hooks and instruction files like AGENTS.md, sharing one setup across agents, and moving keys out of `~/.zshenv` into Secrets. Thank you.
-
-<a href="https://x.com/ramxcodes/status/2113292890294423802"><img src="docs/ram-tweet.png" alt="Ram's post suggesting project scoping, hooks and AGENTS.md support, a harness port across agents, and on-demand env access" width="420" /></a>
+- [Clove](https://github.com/keshav-exe/clove) by keshav-exe — the macOS app whose storage view and file browsing inspired this port. MIT licensed.
+- [Rune](https://github.com/rune-rs/rune) — the Rust GPU UI framework the app is built on.
 
 ## License
 
-The source is [MIT](LICENSE): read it, build it, fork it. The signed, notarized download is what the lifetime license pays for, and it funds the work.
+MIT — see [LICENSE](LICENSE).
