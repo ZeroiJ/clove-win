@@ -114,6 +114,9 @@ struct State {
     properties_path: Option<PathBuf>,
     properties_size: Option<u64>,
     properties_loading: bool,
+    renaming: Option<usize>,
+    rename_text: TextEdit,
+    context_menu: Option<usize>,
     status: String,
     loading: bool,
     /// Receipt from the last trash, so Ctrl+Z can put it back.
@@ -744,7 +747,12 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     }
     // F2 rename (placeholder: sets status; full inline edit deferred).
     if ev.key == Key::Function(2) {
-        s.status = "rename: not yet implemented".into();
+        if let Some(&idx) = s.filtered.get(s.cursor) {
+            if let Some(entry) = s.snapshot.entries.get(idx) {
+                s.renaming = Some(idx);
+                s.rename_text = TextEdit::new(&entry.name);
+            }
+        }
         return true;
     }
     // Ctrl+I properties.
@@ -885,6 +893,10 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             true
         }
         Key::Escape => {
+            if s.context_menu.is_some() {
+                s.context_menu = None;
+                return true;
+            }
             if s.properties_path.is_some() {
                 s.properties_path = None;
                 return true;
@@ -903,6 +915,45 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         }
         _ => false,
     }
+}
+
+fn handle_rename_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    if ev.key == Key::Enter {
+        if let Some(idx) = s.renaming {
+            if let Some(entry) = s.snapshot.entries.get(idx) {
+                if let Some(old_path) = entry_path(&s.location, entry) {
+                    let new_name = s.rename_text.text.trim().to_string();
+                    if !new_name.is_empty() && new_name != entry.name {
+                        if let Some(parent) = old_path.parent() {
+                            let new_path = parent.join(&new_name);
+                            let handle = s.handle.clone();
+                            let old = old_path.clone();
+                            std::thread::spawn(move || {
+                                let res = std::fs::rename(&old, &new_path);
+                                handle.update(move |s, _| {
+                                    if res.is_ok() {
+                                        s.status = format!("renamed to {}", new_name);
+                                    } else {
+                                        s.status = "rename failed".into();
+                                    }
+                                    s.renaming = None;
+                                    reload(s);
+                                });
+                            });
+                        }
+                    } else {
+                        s.renaming = None;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    if ev.key == Key::Escape {
+        s.renaming = None;
+        return true;
+    }
+    false
 }
 
 fn handle_address_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
@@ -1086,14 +1137,26 @@ fn format_size(size: u64) -> String {
 fn row_el(s: &State, index: usize) -> El {
     let entry: &Entry = &s.snapshot.entries[index];
     let selected = s.selected.contains(&index);
-    row()
+    let renaming = s.renaming == Some(index);
+    let mut r = row()
         .key(format!("row-{index}"))
         .h(ROW_H)
         .px(8.0)
         .center_y()
         .radius(tokens::RADIUS_ROW)
-        .fill(if selected { selection() } else { Color::TRANSPARENT })
-        .child(
+        .fill(if selected { selection() } else { Color::TRANSPARENT });
+    if renaming {
+        r = r.child(
+            text_input(&s.rename_text, type_::BODY)
+                .key(format!("rename-{index}"))
+                .single_line()
+                .grow(1.0)
+                .color(ink())
+                .on_edit(|s: &mut State| &mut s.rename_text)
+                .on_input_key(handle_rename_key),
+        );
+    } else {
+        r = r.child(
             text(if entry.is_dir {
                 format!("{}", entry.name)
             } else {
@@ -1102,16 +1165,22 @@ fn row_el(s: &State, index: usize) -> El {
             .font(type_::BODY)
             .color(if entry.is_dir { ink() } else { ink_secondary() })
             .grow(1.0),
-        )
-        .child(
-            text(if entry.is_dir {
-                "folder".to_owned()
-            } else {
-                format_size(entry.size)
-            })
-            .font(type_::LABEL)
-            .color(ink_secondary()),
-        )
+        );
+    }
+    r = r.child(
+        text(if entry.is_dir {
+            "folder".to_owned()
+        } else {
+            format_size(entry.size)
+        })
+        .font(type_::LABEL)
+        .color(ink_secondary()),
+    );
+    let idx2 = index;
+    r = r.on_secondary_press(move |s: &mut State, _, _| {
+        s.context_menu = Some(idx2);
+    });
+    r
 }
 
 fn location_label(loc: &Location) -> String {
@@ -1156,6 +1225,20 @@ fn breadcrumbs_el(s: &State) -> El {
         }
     }
     row
+}
+
+fn ctx_item(label: &'static str, on: impl Fn(&mut State) + 'static) -> El {
+    let on = std::rc::Rc::new(on);
+    let on2 = on.clone();
+    el()
+        .key(format!("ctx-{}", label))
+        .w_full()
+        .h(24.0)
+        .px(8.0)
+        .center_y()
+        .radius(tokens::RADIUS_CONTROL)
+        .child(text(label).font(type_::BODY).color(ink()))
+        .on_press(move |s: &mut State| on2(s))
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
@@ -1459,6 +1542,70 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
         } else {
             col().key("props-off").w(0.0).h(0.0)
         })
+        // Context menu (right-click).
+        .child(if s.context_menu.is_some() {
+            let idx = s.context_menu.unwrap();
+            let entry_name = s.snapshot.entries.get(idx).map(|e| e.name.clone()).unwrap_or_default();
+            col()
+                .key("ctx-overlay")
+                .w_full()
+                .h_full()
+                .center()
+                .child(
+                    col()
+                        .key("ctx-card")
+                        .w(200.0)
+                        .padding(8.0)
+                        .gap(4.0)
+                        .radius(tokens::RADIUS_CONTROL)
+                        .fill(surface())
+                        .child(ctx_item("Open", move |s: &mut State| {
+                            if let Some(&i) = s.filtered.get(s.cursor) {
+                                // no-op placeholder
+                            }
+                            let _ = idx;
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Copy", move |s: &mut State| {
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Delete", move |s: &mut State| {
+                            if let Some(e) = s.snapshot.entries.get(idx) {
+                                if let Some(p) = entry_path(&s.location, e) {
+                                    let root = match &s.location { Location::Folder(d) => d.clone(), _ => return };
+                                    let handle = s.handle.clone();
+                                    std::thread::spawn(move || {
+                                        let _ = clove_shell::trash(&p, &root, false);
+                                        handle.update(move |s, _| { reload(s); });
+                                    });
+                                }
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Rename (F2)", move |s: &mut State| {
+                            s.renaming = Some(idx);
+                            if let Some(e) = s.snapshot.entries.get(idx) {
+                                s.rename_text = TextEdit::new(&e.name);
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Properties", move |s: &mut State| {
+                            if let Some(e) = s.snapshot.entries.get(idx) {
+                                if let Some(p) = entry_path(&s.location, e) {
+                                    s.properties_path = Some(p);
+                                    s.properties_size = None;
+                                    s.properties_loading = true;
+                                }
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Close", move |s: &mut State| {
+                            s.context_menu = None;
+                        })),
+                )
+        } else {
+            col().key("ctx-off").w(0.0).h(0.0)
+        })
 }
 
 // ---------------------------------------------------------------- main
@@ -1638,6 +1785,9 @@ fn build_state(handle: AppHandle<State>) -> State {
         properties_path: None,
         properties_size: None,
         properties_loading: false,
+        renaming: None,
+        rename_text: TextEdit::new(""),
+        context_menu: None,
         show_hidden,
         status: String::new(),
         loading: false,
