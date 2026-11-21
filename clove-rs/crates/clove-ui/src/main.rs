@@ -25,8 +25,9 @@ use rune::{
 };
 
 use clove_fs::{list_dir, DirWatcher, Entry, Snapshot};
+use clove_fs::scan::{ScanEvent, StorageKind, StorageScan, KIND_COUNT};
 use clove_render::tokens::{self, Rgb};
-use clove_render::{BarRenderer, BarSpec};
+use clove_render::{BarRenderer, BarSpec, Segment};
 
 // ---------------------------------------------------------------- palette
 
@@ -101,6 +102,14 @@ struct State {
     /// Bumped on every navigation so stale load/watch threads stop applying.
     generation: Arc<AtomicU64>,
     handle: AppHandle<State>,
+    // --- storage scan ---
+    storage_bytes: [u64; KIND_COUNT],
+    storage_capacity: u64,
+    storage_used: u64,
+    scan: Option<StorageScan>,
+    scan_started: bool,
+    storage_ready: bool,
+    bar_width: f32,
 }
 
 impl State {
@@ -114,6 +123,32 @@ impl State {
 fn refilter(s: &mut State) {
     s.filtered = clove_search::filter(&s.snapshot.entries, &s.query.text);
     s.selected = s.selected.min(s.filtered.len().saturating_sub(1));
+}
+
+fn rebuild_bar(s: &mut State) {
+    let spec = if s.storage_ready {
+        let total: u64 = s.storage_bytes.iter().sum();
+        let capacity = if s.storage_capacity > 0 {
+            s.storage_capacity
+        } else {
+            total.max(1)
+        };
+        let segments = s
+            .storage_bytes
+            .iter()
+            .enumerate()
+            .map(|(kind, &bytes)| Segment::kind(kind, bytes as f32 / capacity as f32))
+            .collect();
+        BarSpec::new(s.bar_width, segments).with_height(BAR_H)
+    } else {
+        BarSpec::placeholder(s.bar_width).with_height(BAR_H)
+    };
+    let mut renderer = BarRenderer::new(spec);
+    renderer.render(s.bar_time);
+    let (w, h) = renderer.size();
+    s.bar.set(w as u32, h as u32, renderer.buffer().to_vec());
+    s.bar_renderer = renderer;
+    s.wake_bar();
 }
 
 /// Reads `dir` and swaps it in, unless a newer navigation has superseded this load.
@@ -302,14 +337,60 @@ fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
     }
 
     s.bar_time = clock as f32;
+
+    // Start the storage scan once, after the first frame is on its way. The scan runs on
+    // its own threads; this only spawns them and records the volume's capacity.
+    if !s.scan_started {
+        s.scan_started = true;
+        let scan = StorageScan::start();
+        if let Some(volume) = scan.volume() {
+            s.storage_capacity = volume.capacity;
+            s.storage_used = volume.used();
+        }
+        s.scan = Some(scan);
+        tx.wake_after(Duration::from_millis(100));
+    }
+
+    let mut changed = false;
+    let mut finished = false;
+    if let Some(scan) = &s.scan {
+        while let Some(event) = scan.try_recv() {
+            match event {
+                ScanEvent::Progress(progress) => {
+                    s.storage_bytes[progress.kind.index()] = progress.bytes;
+                }
+                ScanEvent::Done(report) => {
+                    s.storage_bytes[report.kind.index()] = report.bytes;
+                }
+                ScanEvent::Finished => finished = true,
+            }
+        }
+    }
+    if finished {
+        s.scan = None;
+        let counted: u64 = s
+            .storage_bytes
+            .iter()
+            .enumerate()
+            .filter(|(kind, _)| *kind != StorageKind::System.index())
+            .map(|(_, &bytes)| bytes)
+            .sum();
+        s.storage_bytes[StorageKind::System.index()] = s.storage_used.saturating_sub(counted);
+        s.storage_ready = true;
+        rebuild_bar(s);
+        changed = true;
+    } else if s.scan.is_some() {
+        tx.wake_after(Duration::from_millis(100));
+    }
+
     if s.bar_time >= s.bar_until {
-        return false;
+        return changed;
     }
 
     let before = s.bar_renderer.frame_seq();
     s.bar_renderer.render(s.bar_time);
-    let changed = s.bar_renderer.frame_seq() != before;
-    if changed {
+    let dirty = s.bar_renderer.frame_seq() != before;
+    if dirty {
         let (w, h) = s.bar_renderer.size();
         s.bar.set(w as u32, h as u32, s.bar_renderer.buffer().to_vec());
     }
@@ -317,7 +398,7 @@ fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
     if s.bar_time < s.bar_until {
         tx.wake_after(Duration::from_millis(33));
     }
-    changed
+    dirty || changed
 }
 
 // ---------------------------------------------------------------- view
@@ -414,6 +495,12 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                 .h(BAR_H)
                 .radius(tokens::RADIUS_BAR)
                 .clip_rounded(tokens::RADIUS_BAR)
+                .on_layout(|s: &mut State, [_, _, w, _]| {
+                    if (s.bar_width - w).abs() >= 0.5 {
+                        s.bar_width = w;
+                        rebuild_bar(s);
+                    }
+                })
                 .pixels_fit(&s.bar, rune::SurfaceFit::Fill),
         )
         // Filter field.
@@ -465,19 +552,20 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 
 // ---------------------------------------------------------------- main
 
-fn build_state(handle: AppHandle<State>) -> State {
-    let dir = std::env::var("USERPROFILE")
+fn start_dir() -> PathBuf {
+    // `CLOVE_START_DIR` lets a headless `--script` run open a sandbox directory, which is how
+    // the filter/trash/undo paths are exercised without a window.
+    std::env::var("CLOVE_START_DIR")
+        .ok()
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("C:\\"));
+        .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("C:\\"))
+}
 
-    // Placeholder kind fractions until the storage scan lands (Phase B item 3).
-    const PLACEHOLDER: [f32; 9] = [0.18, 0.16, 0.11, 0.09, 0.12, 0.07, 0.13, 0.09, 0.05];
-    let segments = PLACEHOLDER
-        .iter()
-        .enumerate()
-        .map(|(kind, &fraction)| clove_render::Segment::kind(kind, fraction))
-        .collect();
-    let spec = BarSpec::new(936.0, segments).with_height(BAR_H);
+fn build_state(handle: AppHandle<State>) -> State {
+    let dir = start_dir();
+
+    let spec = BarSpec::placeholder(936.0).with_height(BAR_H);
     let mut bar_renderer = BarRenderer::new(spec);
     bar_renderer.render(0.0);
     let (w, h) = bar_renderer.size();
@@ -500,6 +588,13 @@ fn build_state(handle: AppHandle<State>) -> State {
         focus_attempts: 0,
         generation: Arc::new(AtomicU64::new(0)),
         handle,
+        storage_bytes: [0; KIND_COUNT],
+        storage_capacity: 0,
+        storage_used: 0,
+        scan: None,
+        scan_started: false,
+        storage_ready: false,
+        bar_width: 936.0,
     }
 }
 
@@ -517,9 +612,7 @@ fn main() {
 
     let boot = app.handle();
     std::thread::spawn(move || {
-        let dir = std::env::var("USERPROFILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("C:\\"));
+        let dir = start_dir();
         boot.update(move |s, _| open_dir(s, dir));
     });
 

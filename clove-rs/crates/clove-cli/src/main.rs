@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clove_fs::{list_dir, Entry, Snapshot};
+use clove_fs::scan::{StorageScan, StorageKind};
 use clove_render::{BarRenderer, BarSpec, Rgb, Segment};
 use clove_render::tokens;
 
@@ -24,6 +25,7 @@ fn main() -> ExitCode {
         "find" => cmd_find(rest),
         "bar" => cmd_bar(rest),
         "bench" => cmd_bench(rest),
+        "scan" => cmd_scan(rest),
         "-h" | "--help" | "help" => {
             usage();
             Ok(())
@@ -47,7 +49,8 @@ fn usage() {
          clove list <dir> [--hidden]        list a directory (dirs first, case-insensitive)\n  \
          clove find <dir> <query>           scored fuzzy filter over the listing\n  \
          clove bar [opts]                   render the dithered storage bar to PNG\n  \
-         clove bench [dir]                  measure listing, filtering, and bar frames\n\n\
+         clove bench [dir]                  measure listing, filtering, and bar frames\n  \
+clove scan                         measure the disk by storage kind\n\n\
          BAR OPTIONS:\n  \
          --width <pt>    bar width in points (default 936)\n  \
          --height <pt>   bar height in points (default 88)\n  \
@@ -248,22 +251,13 @@ fn cmd_bar(args: &[String]) -> Result<(), String> {
 }
 
 fn bar_spec(args: &BarArgs) -> BarSpec {
-    let segments = match args.kind {
-        Some(kind) => vec![Segment::kind(kind, 1.0)],
-        None => {
-            // Placeholder fractions until the storage scan lands; nine kinds, uneven like a
-            // real disk so the bar reads as a stack rather than a rainbow.
-            const PLACEHOLDER: [f32; 9] = [0.18, 0.16, 0.11, 0.09, 0.12, 0.07, 0.13, 0.09, 0.05];
-            PLACEHOLDER
-                .iter()
-                .enumerate()
-                .map(|(k, &f)| Segment::kind(k, f))
-                .collect()
-        }
+    let mut spec = match args.kind {
+        Some(kind) => BarSpec::new(args.width, vec![Segment::kind(kind, 1.0)]),
+        None => BarSpec::placeholder(args.width),
     };
-    BarSpec::new(args.width, segments)
-        .with_height(args.height)
-        .with_scale(args.scale)
+    spec.height_pts = args.height;
+    spec.scale = args.scale;
+    spec
 }
 
 /// Writes the straight-alpha bar buffer over `background`, as the app composites it.
@@ -289,6 +283,83 @@ fn write_png(path: &Path, rgba: &[u8], w: usize, h: usize, background: Rgb) -> R
         .map_err(|e| format!("png data: {e}\n"))?;
     Ok(())
 }
+
+// ---------------------------------------------------------------- scan
+
+fn cmd_scan(args: &[String]) -> Result<(), String> {
+    let mut kind: Option<usize> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--kind" => {
+                let value = iter.next().ok_or_else(|| "--kind needs a value\n".to_string())?;
+                kind = Some(value.parse::<usize>().map_err(|_| format!("not a number: `{value}`\n"))?);
+            }
+            other => return Err(format!("unknown scan option `{other}`\n")),
+        }
+    }
+
+    let home = std::env::var_os("USERPROFILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("C:\\"));
+    let started = Instant::now();
+    let scan = match kind {
+        Some(index) => {
+            let kind = StorageKind::from_index(index)
+                .ok_or_else(|| format!("kind {index} out of range (0..{})\n", clove_fs::scan::KIND_COUNT))?;
+            StorageScan::start_with(vec![(kind, kind.roots())], home.clone())
+        }
+        None => StorageScan::start(),
+    };
+    let volume = scan.volume();
+    let reports = scan.wait();
+    let elapsed = started.elapsed();
+
+    println!("clove scan - {}", home.display());
+    if let Some(volume) = volume {
+        println!(
+            "volume         {:>9} used of {:>9}",
+            human_gb(volume.used()),
+            human_gb(volume.capacity)
+        );
+    }
+    println!();
+    println!("{:<12}{:>10}{:>12}{:>10}", "Kind", "Size", "Files", "Time");
+    let mut counted = 0u64;
+    for report in &reports {
+        counted += report.bytes;
+        println!(
+            "{:<12}{:>10}{:>12}{:>9.2}s",
+            report.kind.title(),
+            human_gb(report.bytes),
+            format!("{}", report.files),
+            report.elapsed.as_secs_f64()
+        );
+        if report.restricted {
+            println!("             (restricted: Clove could not read one of the roots)");
+        }
+    }
+    if kind.is_none() {
+        let system = volume
+            .map(|v| v.used().saturating_sub(counted))
+            .unwrap_or(0);
+        println!("{:<12}{:>10}{:>12}{:>10}", "System", human_gb(system), "derived", "");
+        counted += system;
+    }
+    println!();
+    println!("counted        {}", human_gb(counted));
+    println!("finished in    {:?}", elapsed);
+    Ok(())
+}
+
+fn human_gb(bytes: u64) -> String {
+    if bytes >= 1_000_000_000_000 {
+        format!("{:.1} TB", bytes as f64 / 1e12)
+    } else {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    }
+}
+
 
 // ---------------------------------------------------------------- bench
 

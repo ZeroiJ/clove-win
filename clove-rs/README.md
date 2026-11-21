@@ -9,7 +9,7 @@ Phases A and B of the port (see `../docs/rust-port/06-roadmap.md`). Everything e
 | `clove-search` | Scored per-keystroke filter + cancellable worker (no index, as the Swift app) |
 | `clove-render` | Clove's dithered storage bar as pure CPU rendering + design tokens |
 | `clove-shell` | Delete/trash safety: direct-child guards, receipts, Recycle Bin moves, put-back |
-| `clove-cli` | Headless test surface: `list`, `find`, `bar --out x.png`, `bench` |
+| `clove-cli` | Headless test surface: `list`, `find`, `bar --out x.png`, `bench`, `scan` |
 | `clove-ui` | The Rune app (`bin/clove`): browser, filter field, bar, trash + undo |
 
 ## Commands
@@ -19,6 +19,7 @@ cargo test                     # engine tests (clove-ui is not a default member)
 cargo run -p clove-cli -- list .
 cargo run -p clove-cli -- find . storage
 cargo run -p clove-cli -- bar 936 --out bar.png
+cargo run -p clove-cli -- scan
 cargo run -p clove-cli --release -- bench
 
 cargo run -p clove-ui --release            # the app

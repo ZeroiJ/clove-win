@@ -65,10 +65,21 @@ impl BarSpec {
         }
     }
 
-    /// All nine kinds with equal fractions (placeholder until the storage scan lands).
+    /// All nine kinds with equal fractions (used by benchmarks).
     pub fn even(width_pts: f32) -> Self {
         let segments = (0..STORAGE_KIND_RGB.len())
             .map(|k| Segment::kind(k, 1.0 / STORAGE_KIND_RGB.len() as f32))
+            .collect();
+        BarSpec::new(width_pts, segments)
+    }
+
+    /// The prototype's uneven fractions, shown until the first storage scan finishes.
+    pub fn placeholder(width_pts: f32) -> Self {
+        const PLACEHOLDER: [f32; 9] = [0.18, 0.16, 0.11, 0.09, 0.12, 0.07, 0.13, 0.09, 0.05];
+        let segments = PLACEHOLDER
+            .iter()
+            .enumerate()
+            .map(|(kind, &fraction)| Segment::kind(kind, fraction))
             .collect();
         BarSpec::new(width_pts, segments)
     }

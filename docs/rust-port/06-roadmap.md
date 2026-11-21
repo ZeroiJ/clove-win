@@ -44,6 +44,10 @@ Deliverable: `clove-ui` running the prototype's three surfaces against the real 
 Exit criteria: daily-driver-able over `C:\Users\<user>`; a11y labels on all rows (Narrator
 reads the list).
 
+**Status (2026-11-21): Phase B skeleton complete; real storage scan landed.** Numbers and
+findings in `docs/rust-port/08-phase-b-status.md`. Remaining Phase B work: live per-kind
+growth in the bar, device-scale-aware rendering, 30-min cache, kind legend, a11y labels.
+
 ## Phase C — Identity & polish pass
 
 1. **Prerequisite:** capture the Swift app on a Mac (bar at rest, bar mid-scan, browser,

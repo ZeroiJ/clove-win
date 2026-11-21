@@ -9,8 +9,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
+pub mod scan;
 pub mod watch;
 
+pub use scan::{scan_kind, scan_roots, ScanEvent, StorageKind, StorageScan, Volume, KIND_COUNT, PROGRESS_INTERVAL};
 pub use watch::{DirWatcher, WatchSignal};
 
 /// One directory entry as the UI sees it.
