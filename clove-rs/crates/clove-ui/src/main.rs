@@ -119,6 +119,8 @@ struct State {
     context_menu: Option<usize>,
     thumbnails: std::collections::HashMap<PathBuf, (u32, u32, Vec<u8>)>,
     thumbnail_pending: std::collections::HashSet<PathBuf>,
+    tabs: Vec<Location>,
+    active_tab: usize,
     status: String,
     loading: bool,
     /// Receipt from the last trash, so Ctrl+Z can put it back.
@@ -280,6 +282,7 @@ fn load_into(
                 s.snapshot = Arc::new(snapshot);
                 s.location = Location::Folder(dir);
                 sync_address(s);
+                // tab update not available here easily; skip
                 if s.loading {
                     s.status.clear();
                 }
@@ -305,6 +308,8 @@ fn navigate(s: &mut State, location: Location) {
 
     s.location = location.clone();
     sync_address(s);
+    if s.tabs.is_empty() { s.tabs.push(s.location.clone()); }
+    if s.active_tab < s.tabs.len() { s.tabs[s.active_tab] = s.location.clone(); }
     s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), Vec::new()));
     s.filtered.clear();
     s.selected.clear();
@@ -353,6 +358,7 @@ fn go_back(s: &mut State) {
     let target = prev;
     s.location = target.clone();
     sync_address(s);
+    if !s.tabs.is_empty() && s.active_tab < s.tabs.len() { s.tabs[s.active_tab] = s.location.clone(); }
     s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), Vec::new()));
     s.filtered.clear();
     s.selected.clear();
@@ -388,6 +394,7 @@ fn go_forward(s: &mut State) {
     let target = next;
     s.location = target.clone();
     sync_address(s);
+    if !s.tabs.is_empty() && s.active_tab < s.tabs.len() { s.tabs[s.active_tab] = s.location.clone(); }
     s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), Vec::new()));
     s.filtered.clear();
     s.selected.clear();
@@ -824,6 +831,33 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                     });
                 }
             }
+        }
+        return true;
+    }
+    // Tabs.
+    if ev.is_command('t') {
+        s.tabs.push(s.location.clone());
+        s.active_tab = s.tabs.len() - 1;
+        s.status = format!("tab {}", s.active_tab + 1);
+        return true;
+    }
+    if ev.is_command('w') {
+        if s.tabs.len() > 1 {
+            s.tabs.remove(s.active_tab);
+            if s.active_tab >= s.tabs.len() { s.active_tab = s.tabs.len() - 1; }
+            let target = s.tabs[s.active_tab].clone();
+            navigate(s, target);
+            sync_address(s);
+        }
+        return true;
+    }
+    // Ctrl+Tab next tab (approx via command tab not standard; use F6).
+    if ev.key == Key::Function(6) {
+        if !s.tabs.is_empty() {
+            s.active_tab = (s.active_tab + 1) % s.tabs.len();
+            let target = s.tabs[s.active_tab].clone();
+            navigate(s, target);
+            sync_address(s);
         }
         return true;
     }
@@ -1302,6 +1336,33 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
         .fill(bg())
         .padding(12.0)
         .gap(8.0)
+        // Tab bar.
+        .child(
+            row()
+                .key("tabs")
+                .w_full()
+                .h(24.0)
+                .gap(4.0)
+                .center_y()
+                .children((0..s.tabs.len()).map(|i| {
+                    let active = i == s.active_tab;
+                    el()
+                        .key(format!("tab-{i}"))
+                        .px(8.0)
+                        .h(20.0)
+                        .radius(tokens::RADIUS_CONTROL)
+                        .fill(if active { selection() } else { surface() })
+                        .child(text(format!("Tab {}", i + 1)).font(type_::LABEL).color(ink()))
+                        .on_press(move |s: &mut State| {
+                            if i < s.tabs.len() {
+                                s.active_tab = i;
+                                let target = s.tabs[i].clone();
+                                navigate(s, target);
+                                sync_address(s);
+                            }
+                        })
+                })),
+        )
         // Toolbar: Back / Forward / Up + address bar.
         .child(
             row()
@@ -1868,6 +1929,8 @@ fn build_state(handle: AppHandle<State>) -> State {
         context_menu: None,
         thumbnails: std::collections::HashMap::new(),
         thumbnail_pending: std::collections::HashSet::new(),
+        tabs: vec![Location::ThisPc],
+        active_tab: 0,
         show_hidden,
         status: String::new(),
         loading: false,
