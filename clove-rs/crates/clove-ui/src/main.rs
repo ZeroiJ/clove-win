@@ -148,6 +148,43 @@ impl State {
 
 // ---------------------------------------------------------------- engine glue
 
+fn trigger_search(s: &mut State) {
+    let query = s.search_query.text.trim().to_lowercase();
+    if query.is_empty() {
+        s.search_results.clear();
+        return;
+    }
+    let root = match &s.location {
+        Location::Folder(d) => d.clone(),
+        _ => return,
+    };
+    let handle = s.handle.clone();
+    std::thread::spawn(move || {
+        let mut results = Vec::new();
+        walk_dir(&root, &query, &mut results);
+        handle.update(move |s, _| {
+            s.search_results = results;
+        });
+    });
+}
+
+fn walk_dir(dir: &Path, query: &str, out: &mut Vec<PathBuf>) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for item in rd.flatten() {
+            let path = item.path();
+            let name = item.file_name().to_string_lossy().to_lowercase();
+            if name.contains(query) {
+                out.push(path.clone());
+                if out.len() >= 500 { return; }
+            }
+            if item.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                walk_dir(&path, query, out);
+                if out.len() >= 500 { return; }
+            }
+        }
+    }
+}
+
 fn refilter(s: &mut State) {
     let mut idx = clove_search::filter(&s.snapshot.entries, &s.query.text);
     if !s.show_hidden {
@@ -1262,6 +1299,30 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                 ),
         )
         .child(row().key("hairline").w_full().h(1.0).fill(hairline()))
+        // Search within folder (Ctrl+F).
+        .child(if s.search_mode {
+            col()
+                .key("search-row")
+                .w_full()
+                .h(32.0)
+                .px(8.0)
+                .radius(tokens::RADIUS_CONTROL)
+                .fill(surface())
+                .center_y()
+                .child(
+                    text_input(&s.search_query, type_::BODY)
+                        .key("search")
+                        .label("Search recursively")
+                        .single_line()
+                        .grow(1.0)
+                        .color(ink())
+                        .placeholder("search files in this folder...", ink_secondary())
+                        .on_edit(|s: &mut State| &mut s.search_query)
+                        .on_input_change(|s: &mut State, _| trigger_search(s)),
+                )
+        } else {
+            col().key("search-off").w_full().h(0.0)
+        })
         // Virtualized listing: only mounted rows build.
         .child(
             col()
@@ -1269,7 +1330,23 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                 .scroll(ScrollSpec { stick_bottom: false })
                 .grow(1.0)
                 .min_h(0.0)
-                .child(
+                .child(if s.search_mode {
+                    let mut col = col().key("search-results").w_full().gap(2.0);
+                    for (i, p) in s.search_results.iter().take(200).enumerate() {
+                        col = col.child(
+                            text(p.display().to_string())
+                                .key(format!("sr-{i}"))
+                                .font(type_::BODY)
+                                .color(ink_secondary()),
+                        );
+                    }
+                    if s.search_results.is_empty() {
+                        col = col.child(text("no results").font(type_::LABEL).color(ink_secondary()));
+                    } else {
+                        col = col.child(text(format!("{} results", s.search_results.len())).font(type_::LABEL).color(ink_secondary()));
+                    }
+                    col
+                } else {
                     col()
                         .key("rows")
                         .w_full()
@@ -1280,8 +1357,8 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                             ROW_H,
                             |s: &State, i| format!("row-{}", s.filtered[i]).into(),
                             |s: &State, i| row_el(s, s.filtered[i]),
-                        ),
-                ),
+                        )
+                }),
         )
         // Preview pane (toggle Ctrl+P).
         .child(if s.preview_open {
