@@ -1396,6 +1396,47 @@ fn handle_address_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         s.status = format!("not found: {text}");
         return true;
     }
+    // Tab completion.
+    if ev.key == Key::Tab {
+        let text = s.address.text.trim().to_string();
+        if text.is_empty() || text.eq_ignore_ascii_case("This PC") { return true; }
+        let path = PathBuf::from(&text);
+        let (parent, prefix) = if text.ends_with('/') || text.ends_with(std::path::MAIN_SEPARATOR) {
+            (path.clone(), String::new())
+        } else {
+            (path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("/")), path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+        };
+        let mut matches: Vec<String> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&parent) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(&prefix) {
+                    let suffix = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) { "/" } else { "" };
+                    matches.push(format!("{}{}", name, suffix));
+                }
+            }
+        }
+        if matches.len() == 1 {
+            let new = parent.join(matches[0].trim_end_matches('/'));
+            s.address.text = new.to_string_lossy().to_string();
+            if matches[0].ends_with('/') { s.address.text.push('/'); }
+        } else if matches.len() > 1 {
+            // complete common prefix
+            let first = &matches[0];
+            let mut common = first.clone();
+            for m in &matches[1..] {
+                while !m.starts_with(&common) && !common.is_empty() {
+                    common.pop();
+                }
+            }
+            if common.len() > prefix.len() {
+                let base = if prefix.is_empty() { text.clone() } else { text[..text.len()-prefix.len()].to_string() };
+                s.address.text = format!("{}{}", base, common);
+            }
+            s.status = format!("{} matches", matches.len());
+        }
+        return true;
+    }
     false
 }
 
