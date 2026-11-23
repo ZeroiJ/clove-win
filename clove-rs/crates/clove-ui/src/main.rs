@@ -205,6 +205,7 @@ struct State {
     bar_width: f32,
     ui_scale: f32,
     show_hidden: bool,
+    show_shortcuts: bool,
 }
 
 impl State {
@@ -943,6 +944,57 @@ impl Sha256Hasher {
     }
 }
 
+fn collect_files_recursive(root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(root) else { return; };
+    for e in rd.flatten() {
+        let p = e.path();
+        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) { collect_files_recursive(&p, out); }
+        else { out.push(p); }
+    }
+}
+
+fn find_duplicates(root: &Path) -> Vec<(String, Vec<PathBuf>)> {
+    let mut files = Vec::new();
+    collect_files_recursive(root, &mut files);
+    let mut by_size: std::collections::HashMap<u64, Vec<PathBuf>> = std::collections::HashMap::new();
+    for p in files {
+        if let Ok(md) = p.metadata() { by_size.entry(md.len()).or_default().push(p); }
+    }
+    let mut out = Vec::new();
+    for (_sz, group) in by_size {
+        if group.len() < 2 { continue; }
+        let mut by_hash: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
+        for p in group {
+            if let Some(h) = file_checksum(&p) { by_hash.entry(h).or_default().push(p); }
+        }
+        for (h, g) in by_hash { if g.len() > 1 { out.push((h, g)); } }
+    }
+    out
+}
+
+fn compare_dirs(a: &Path, b: &Path) -> (usize, usize, usize) {
+    fn walk(root: &Path, base: &Path, out: &mut std::collections::HashMap<String, u64>) {
+        let Ok(rd) = std::fs::read_dir(root) else { return; };
+        for e in rd.flatten() {
+            let p = e.path();
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) { walk(&p, base, out); }
+            else if let Ok(rel) = p.strip_prefix(base) {
+                out.insert(rel.to_string_lossy().to_string(), e.metadata().map(|m| m.len()).unwrap_or(0));
+            }
+        }
+    }
+    let mut ma = std::collections::HashMap::new();
+    let mut mb = std::collections::HashMap::new();
+    walk(a, a, &mut ma);
+    walk(b, b, &mut mb);
+    let mut only_a = 0usize; let mut only_b = 0usize; let mut diff = 0usize;
+    for (k, va) in &ma {
+        match mb.get(k) { None => only_a += 1, Some(vb) if vb != va => diff += 1, _ => {} }
+    }
+    for k in mb.keys() { if !ma.contains_key(k) { only_b += 1; } }
+    (only_a, only_b, diff)
+}
+
 fn props_permissions(path: &Path) -> String {
     #[cfg(unix)]
     {
@@ -1216,6 +1268,10 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         refilter(s);
         save_settings(s);
         s.status = if s.show_hidden { "showing hidden files".into() } else { "hidden files hidden".into() };
+        return true;
+    }
+    if ev.is_command('/') || ev.key == Key::Function(1) {
+        s.show_shortcuts = !s.show_shortcuts;
         return true;
     }
     // Ctrl+C / Ctrl+X: copy/cut selected entries.
@@ -1525,6 +1581,7 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             true
         }
         Key::Escape => {
+            if s.show_shortcuts { s.show_shortcuts = false; return true; }
             if s.op_progress.is_some() {
                 s.op_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 return true;
@@ -2492,6 +2549,20 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         } else {
             col().key("batchrename-off").w(0.0).h(0.0)
         })
+        // Shortcuts overlay.
+        .child(if s.show_shortcuts {
+            col().key("shortcuts-overlay").w_full().h_full().center().child(
+                col().key("shortcuts-card").w(520.0).padding(16.0).gap(6.0).radius(tokens::RADIUS_BAR).fill(surface())
+                    .child(text("Keyboard Shortcuts").font(type_::TITLE).color(ink()))
+                    .child(text("Ctrl+C/X/V copy/cut/paste · Ctrl+Z undo · Del trash · Shift+Del permanent").font(type_::BODY).color(ink_secondary()))
+                    .child(text("F2 rename · Ctrl+Shift+N new folder · Ctrl+T/W tab · F6 next tab").font(type_::BODY).color(ink_secondary()))
+                    .child(text("Ctrl+F search · Ctrl+H hidden · Ctrl+I properties · Ctrl+/ shortcuts").font(type_::BODY).color(ink_secondary()))
+                    .child(text("Enter open/extract · Backspace up · Tab complete address").font(type_::BODY).color(ink_secondary()))
+                    .child(el().key("sc-close").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
+                        .child(text("Close").font(type_::BODY).color(ink()))
+                        .on_press(|s: &mut State| { s.show_shortcuts = false; }))
+            )
+        } else { col().key("shortcuts-off").w(0.0).h(0.0) })
         // Open With modal.
         .child(if s.open_with_open {
             col()
@@ -2776,16 +2847,15 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                                 let name = paths.first().and_then(|p| p.file_name()).map(|n| format!("{}.tar.gz", n.to_string_lossy())).unwrap_or_else(|| "archive.tar.gz".into());
                                 let dest = target.join(name);
                                 let handle = s.handle.clone();
-                                s.status = "compressing...".into();
+                                s.op_progress = Some(FileOpProgress { label: "Compressing".into(), done: 0, total: 1, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
                                 std::thread::spawn(move || {
-                                    // Use tar with -C parent and relative names.
                                     let mut args = vec!["czf".to_string(), dest.to_string_lossy().to_string()];
-                                    for p in &paths {
-                                        args.push(p.to_string_lossy().to_string());
-                                    }
+                                    for p in &paths { args.push(p.to_string_lossy().to_string()); }
                                     let res = std::process::Command::new("tar").args(&args).status();
+                                    let ok = res.map(|r| r.success()).unwrap_or(false);
                                     handle.update(move |s, _| {
-                                        s.status = if res.map(|r| r.success()).unwrap_or(false) { "compressed".into() } else { "compress failed".into() };
+                                        s.op_progress = None;
+                                        s.status = if ok { "compressed".into() } else { "compress failed".into() };
                                         reload(s);
                                     });
                                 });
@@ -2801,15 +2871,17 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                                         let target = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
                                         let handle = s.handle.clone();
                                         let p = path.clone();
-                                        s.status = "extracting...".into();
+                                        s.op_progress = Some(FileOpProgress { label: "Extracting".into(), done: 0, total: 1, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
                                         std::thread::spawn(move || {
                                             let res = if p.to_string_lossy().ends_with(".zip") {
                                                 std::process::Command::new("unzip").args(["-o", &p.to_string_lossy(), "-d", &target.to_string_lossy()]).status()
                                             } else {
                                                 std::process::Command::new("tar").args(["xf", &p.to_string_lossy(), "-C", &target.to_string_lossy()]).status()
                                             };
+                                            let ok = res.map(|r| r.success()).unwrap_or(false);
                                             handle.update(move |s, _| {
-                                                s.status = if res.map(|r| r.success()).unwrap_or(false) { "extracted".into() } else { "extract failed".into() };
+                                                s.op_progress = None;
+                                                s.status = if ok { "extracted".into() } else { "extract failed".into() };
                                                 reload(s);
                                             });
                                         });
@@ -2817,6 +2889,54 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                                         s.status = "not an archive".into();
                                     }
                                 }
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Copy Checksums", move |s: &mut State| {
+                            let mut paths = Vec::new();
+                            for &i2 in &s.selected { if let Some(e) = s.snapshot.entries.get(i2) { if let Some(p) = entry_path(&s.location, e) { if p.is_file() { paths.push(p); } } } }
+                            if paths.is_empty() { if let Some(e) = s.snapshot.entries.get(idx) { if let Some(p) = entry_path(&s.location, e) { if p.is_file() { paths.push(p); } } } }
+                            let handle = s.handle.clone();
+                            s.status = "checksumming...".into();
+                            std::thread::spawn(move || {
+                                let mut lines = Vec::new();
+                                for p in &paths { if let Some(h) = file_checksum(p) { lines.push(format!("{}  {}", h, p.display())); } }
+                                let report = lines.join("\n");
+                                handle.update(move |s, _| {
+                                    if let Ok(mut cb) = arboard::Clipboard::new() { let _ = cb.set_text(report.clone()); }
+                                    s.status = format!("{} checksums copied", lines.len());
+                                });
+                            });
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Find Duplicates", move |s: &mut State| {
+                            let root = match &s.location { Location::Folder(d) => d.clone(), _ => { s.status = "open a folder first".into(); s.context_menu = None; return; } };
+                            let handle = s.handle.clone();
+                            s.op_progress = Some(FileOpProgress { label: "Scanning dupes".into(), done: 0, total: 1, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
+                            std::thread::spawn(move || {
+                                let dups = find_duplicates(&root);
+                                let groups = dups.len();
+                                let files: usize = dups.iter().map(|(_, g)| g.len()).sum();
+                                handle.update(move |s, _| {
+                                    s.op_progress = None;
+                                    s.status = format!("duplicates: {} groups, {} files", groups, files);
+                                });
+                            });
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Compare Folders", move |s: &mut State| {
+                            let mut dirs: Vec<PathBuf> = Vec::new();
+                            for &i2 in &s.selected { if let Some(e) = s.snapshot.entries.get(i2) { if e.is_dir { if let Some(p) = entry_path(&s.location, e) { dirs.push(p); } } } }
+                            if dirs.len() == 2 {
+                                let a = dirs[0].clone(); let b = dirs[1].clone();
+                                let handle = s.handle.clone();
+                                s.status = "comparing...".into();
+                                std::thread::spawn(move || {
+                                    let (oa, ob, diff) = compare_dirs(&a, &b);
+                                    handle.update(move |s, _| { s.status = format!("compare: only A {}, only B {}, different {}", oa, ob, diff); });
+                                });
+                            } else {
+                                s.status = "select exactly 2 folders".into();
                             }
                             s.context_menu = None;
                         }))
@@ -3141,6 +3261,7 @@ fn build_state(handle: AppHandle<State>) -> State {
         tabs: load_tabs(),
         active_tab: 0,
         show_hidden,
+        show_shortcuts: false,
         status: String::new(),
         loading: false,
         undo_stack: Vec::new(),
@@ -3188,4 +3309,51 @@ fn main() {
     }
 
     app.run();
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn checksum_known() {
+        let dir = std::env::temp_dir().join("clove_test_ck");
+        let _ = fs::create_dir_all(&dir);
+        let f = dir.join("a.txt");
+        fs::write(&f, b"hello").unwrap();
+        let h = file_checksum(&f).unwrap();
+        assert_eq!(h.len(), 64);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compare_dirs_basic() {
+        let root = std::env::temp_dir().join("clove_test_cmp");
+        let a = root.join("a"); let b = root.join("b");
+        let _ = fs::create_dir_all(&a); let _ = fs::create_dir_all(&b);
+        fs::write(a.join("same.txt"), b"x").unwrap();
+        fs::write(b.join("same.txt"), b"x").unwrap();
+        fs::write(a.join("onlya.txt"), b"a").unwrap();
+        fs::write(b.join("onlyb.txt"), b"b").unwrap();
+        let (oa, ob, diff) = compare_dirs(&a, &b);
+        assert_eq!(oa, 1);
+        assert_eq!(ob, 1);
+        assert_eq!(diff, 0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_duplicates_basic() {
+        let root = std::env::temp_dir().join("clove_test_dup");
+        let _ = fs::create_dir_all(&root);
+        fs::write(root.join("a.txt"), b"same").unwrap();
+        fs::write(root.join("b.txt"), b"same").unwrap();
+        fs::write(root.join("c.txt"), b"diff").unwrap();
+        let dups = find_duplicates(&root);
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].1.len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

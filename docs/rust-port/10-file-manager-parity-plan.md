@@ -39,22 +39,22 @@ people expect from a daily file manager. Do not lose the no-index, fast-listing 
 - [x] Extended properties: perms, owner (uid), size, SHA256 checksum.
 - [~] Folder sizes on demand: properties computes dir size in background. No cancel/progress UI yet.
 
-## Phase FM4 — Power features (1–2 weeks)  [partial]
+## Phase FM4 — Power features (1–2 weeks)  [mostly complete]
 
 - [x] Terminal here.
-- [ ] Compare folders.
-- [x] Checksum in properties (SHA256). Bulk verify not done.
+- [x] Compare folders (select 2 dirs, name+size diff).
+- [x] Bulk checksum copy/verify report (SHA256, clipboard).
 - [x] Symlink/hardlink creation.
-- [x] Compress/extract actions. Progress UI not done.
-- [ ] Duplicate finder (optional, reuses scan engine).
+- [x] Compress/extract actions with progress status.
+- [x] Duplicate finder (size+SHA256, current folder tree).
 
-## Phase FM5 — Quality and platform (ongoing)
+## Phase FM5 — Quality and platform (ongoing)  [partial]
 
-- [ ] Drag and drop internal/external.
-- [ ] Keyboard shortcut audit and customization.
-- [ ] Accessibility (AT-SPI) pass.
-- [ ] Performance: 100k-entry folders, thumbnail memory bounds.
-- [ ] Cross-platform regression tests for trash/open/mounts.
+- [ ] Drag and drop internal/external (Rune/framework support not wired; deferred).
+- [x] Keyboard shortcut audit overlay (Ctrl+/ or F1). File-based customization not implemented.
+- [~] Accessibility: labels/placeholders on inputs; full AT-SPI pass deferred.
+- [~] Performance: virtualized listing already used; thumbnail 64MB cap added; no 100k benchmark run.
+- [~] Cross-platform regression tests: helper unit tests added (checksum/compare/dupes); trash/open/mount integration tests still limited.
 
 ## Architecture notes
 
