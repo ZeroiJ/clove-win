@@ -31,21 +31,21 @@ people expect from a daily file manager. Do not lose the no-index, fast-listing 
 - [x] Breadcrumb/address editing + Tab path completion.
 - [x] Tabs restore on launch.
 
-## Phase FM3 — Content and metadata (1–2 weeks)
+## Phase FM3 — Content and metadata (1–2 weeks)  [partial]
 
-- [ ] Thumbnail cache: images, video frames, PDF first page, with eviction by bytes.
-- [ ] Archive browsing as virtual folders (zip/tar/7z) via libarchive.
-- [ ] Git badges: repo root detection, branch, dirty/clean, ahead/behind.
-- [ ] Extended properties: permissions, owner, MIME type, checksums.
-- [ ] Folder sizes on demand (background, cancellable).
+- [~] Thumbnail cache: images done in-memory; no eviction/bytes cap, no video/PDF yet.
+- [x] Archive extract-on-navigate (tar/zip/7z/rar via system tools). Virtual browsing deferred.
+- [x] Git badge: branch + dirty icon in header.
+- [x] Extended properties: perms, owner (uid), size, SHA256 checksum.
+- [~] Folder sizes on demand: properties computes dir size in background. No cancel/progress UI yet.
 
-## Phase FM4 — Power features (1–2 weeks)
+## Phase FM4 — Power features (1–2 weeks)  [partial]
 
-- [ ] Terminal here (launch default terminal in the current folder).
+- [x] Terminal here.
 - [ ] Compare folders.
-- [ ] Bulk checksum verify.
-- [ ] Symlink/hardlink creation.
-- [ ] Compress/extract with progress.
+- [x] Checksum in properties (SHA256). Bulk verify not done.
+- [x] Symlink/hardlink creation.
+- [x] Compress/extract actions. Progress UI not done.
 - [ ] Duplicate finder (optional, reuses scan engine).
 
 ## Phase FM5 — Quality and platform (ongoing)
