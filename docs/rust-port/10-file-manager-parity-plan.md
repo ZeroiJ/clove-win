@@ -15,12 +15,12 @@ people expect from a daily file manager. Do not lose the no-index, fast-listing 
 ## Phase FM1 — Operation safety and feedback (1–2 weeks)
 
 - [~] Conflict handling: paste auto-renames on collision; replace/skip/rename/apply-all dialog still TODO.
-- [~] Progress overlay: `op_progress` state/status skeleton added; job queue + cancel UI TODO.
+- [~] Progress overlay: `op_progress` state/status skeleton added; full job queue + cancel UI still TODO.
 - [x] Multi-level undo stack for trash (not only last trash).
-- [~] Context menu: Open, Open With placeholder, Copy, Copy Path, New File, New Folder, Terminal Here, Delete (undo-aware), Rename, Properties. Still TODO: Cut/Paste in menu, Compress, Extract, Reveal.
-- [x] New empty file creation (context menu).
-- [ ] Batch rename with preview.
-- [~] `Open With` via xdg-open/mimeapps: default-app placeholder wired; chooser TODO.
+- [x] Context menu: Open, Open With (app chooser), Copy, Cut, Paste, Copy Path, New File, New Folder, Terminal Here, Reveal, Delete (undo-aware), Rename, Batch Rename, Compress, Extract, Properties.
+- [x] New empty file creation (context menu + Ctrl+?).
+- [x] Batch rename with preview modal.
+- [x] `Open With` via xdg-mime + .desktop chooser.
 
 ## Phase FM2 — Navigation and layout (1–2 weeks)
 
