@@ -22,14 +22,14 @@ people expect from a daily file manager. Do not lose the no-index, fast-listing 
 - [x] Batch rename with preview modal.
 - [x] `Open With` via xdg-mime + .desktop chooser.
 
-## Phase FM2 — Navigation and layout (1–2 weeks)
+## Phase FM2 — Navigation and layout (1–2 weeks)  [mostly complete]
 
-- [ ] Persistent bookmarks sidebar (user folders + custom paths, drag to reorder).
-- [ ] Split view / dual pane with independent navigation and cross-pane copy/move.
-- [ ] Mounts view: local disks, removable media, network mounts from `/proc/mounts`/udisks2.
-- [ ] Network locations: SMB/NFS via gio/gvfs (optional, feature-gated).
-- [ ] Breadcrumb editing and path completion.
-- [ ] Tabs restore on launch.
+- [x] Bookmarks + mounts sidebar (quick access + /proc/mounts; custom reorder TODO).
+- [ ] Split view / dual pane: intentionally skipped per decision.
+- [x] Mounts view: local disks + removable via /proc/mounts.
+- [ ] Network locations: SMB/NFS via gio/gvfs (deferred, feature-gated).
+- [x] Breadcrumb/address editing + Tab path completion.
+- [x] Tabs restore on launch.
 
 ## Phase FM3 — Content and metadata (1–2 weeks)
 
