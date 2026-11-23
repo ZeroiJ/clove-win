@@ -174,6 +174,7 @@ struct State {
     batch_rename_suffix: TextEdit,
     thumbnails: std::collections::HashMap<PathBuf, (u32, u32, Vec<u8>)>,
     thumbnail_pending: std::collections::HashSet<PathBuf>,
+    thumbnail_bytes: usize,
     tabs: Vec<Location>,
     active_tab: usize,
     status: String,
@@ -1022,7 +1023,7 @@ fn load_thumbnails(s: &mut State) {
             if e.is_dir { return None; }
             let path = entry_path(&s.location, e)?;
             let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
-            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp") {
+            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg") {
                 return None;
             }
             if s.thumbnails.contains_key(&path) || s.thumbnail_pending.contains(&path) {
@@ -1047,7 +1048,15 @@ fn load_thumbnails(s: &mut State) {
             handle.update(move |s, _| {
                 s.thumbnail_pending.remove(&path2);
                 if let (Some(d), Some(r)) = (dims, rgba) {
+                    let size = r.len();
+                    s.thumbnail_bytes += size;
                     s.thumbnails.insert(path2, (d.0, d.1, r));
+                    // shortcut: simple eviction by dropping random keys, replace with LRU when thumb cache grows
+                    const MAX_THUMB_BYTES: usize = 64 * 1024 * 1024;
+                    while s.thumbnail_bytes > MAX_THUMB_BYTES {
+                        let Some(k) = s.thumbnails.keys().next().cloned() else { break; };
+                        if let Some((_, _, v)) = s.thumbnails.remove(&k) { s.thumbnail_bytes = s.thumbnail_bytes.saturating_sub(v.len()); }
+                    }
                 }
             });
         });
@@ -3128,6 +3137,7 @@ fn build_state(handle: AppHandle<State>) -> State {
         batch_rename_suffix: TextEdit::new(""),
         thumbnails: std::collections::HashMap::new(),
         thumbnail_pending: std::collections::HashSet::new(),
+        thumbnail_bytes: 0,
         tabs: load_tabs(),
         active_tab: 0,
         show_hidden,
