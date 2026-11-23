@@ -93,6 +93,9 @@ enum Location {
 #[derive(Clone, Debug)]
 enum UndoAction {
     Trash { moves: Vec<clove_shell::Move> },
+    Rename { from: PathBuf, to: PathBuf },
+    Copy { created: Vec<PathBuf> },
+    Move { pairs: Vec<(PathBuf, PathBuf)> },
 }
 
 #[derive(Clone, Debug)]
@@ -615,6 +618,35 @@ fn undo_delete(s: &mut State) {
                         outcome.restored, outcome.missing
                     );
                     s.wake_bar();
+                    reload(s);
+                });
+            }
+            UndoAction::Rename { from, to } => {
+                let _ = std::fs::rename(&to, &from);
+                handle.update(move |s, _| {
+                    s.status = "undo rename".into();
+                    s.wake_bar();
+                    reload(s);
+                });
+            }
+            UndoAction::Copy { created } => {
+                for p in &created {
+                    if p.is_dir() { let _ = std::fs::remove_dir_all(p); } else { let _ = std::fs::remove_file(p); }
+                }
+                handle.update(move |s, _| {
+                    s.status = "undo copy".into();
+                    s.wake_bar();
+                    reload(s);
+                });
+            }
+            UndoAction::Move { pairs } => {
+                for (src, dest) in &pairs {
+                    let _ = std::fs::rename(dest, src);
+                }
+                handle.update(move |s, _| {
+                    s.status = "undo move".into();
+                    s.wake_bar();
+                    reload(s);
                 });
             }
         }
@@ -892,6 +924,8 @@ fn run_paste(s: &mut State, target: PathBuf, paths: Vec<PathBuf>, cut: bool, mod
         let mut moved = 0usize;
         let mut skipped = 0usize;
         let mut failures = 0usize;
+        let mut created: Vec<PathBuf> = Vec::new();
+        let mut pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
         for (i, src) in paths.iter().enumerate() {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 handle.update(move |s, _| {
@@ -936,7 +970,10 @@ fn run_paste(s: &mut State, target: PathBuf, paths: Vec<PathBuf>, cut: bool, mod
             } else {
                 std::fs::copy(src, &dest).map(|_| ())
             };
-            if res.is_ok() { moved += 1; } else { failures += 1; }
+            if res.is_ok() {
+                moved += 1;
+                if cut { pairs.push((src.clone(), dest.clone())); } else { created.push(dest.clone()); }
+            } else { failures += 1; }
             let done = i + 1;
             handle.update(move |s, _| {
                 if let Some(op) = &mut s.op_progress {
@@ -945,10 +982,16 @@ fn run_paste(s: &mut State, target: PathBuf, paths: Vec<PathBuf>, cut: bool, mod
                 }
             });
         }
+        let undo_action = if cut {
+            Some(UndoAction::Move { pairs })
+        } else if !created.is_empty() {
+            Some(UndoAction::Copy { created })
+        } else { None };
         handle.update(move |s, _| {
             s.op_progress = None;
             s.status = format!("pasted {} · skipped {} · failed {}", moved, skipped, failures);
             s.wake_bar();
+            if let Some(a) = undo_action { s.undo_stack.push(a); }
             if cut { s.clipboard.clear(); s.clipboard_cut = false; }
             reload(s);
         });
@@ -1288,14 +1331,29 @@ fn handle_rename_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                     let new_name = s.rename_text.text.trim().to_string();
                     if !new_name.is_empty() && new_name != entry.name {
                         if let Some(parent) = old_path.parent() {
-                            let new_path = parent.join(&new_name);
+                            // Collision policy: if target exists, append (n).
+                            let mut final_path = parent.join(&new_name);
+                            if final_path.exists() {
+                                let stem = final_path.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| new_name.clone());
+                                let ext = final_path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+                                let mut n = 1u32;
+                                loop {
+                                    let cand = parent.join(format!("{stem} ({n}){ext}"));
+                                    if !cand.exists() { final_path = cand; break; }
+                                    n += 1;
+                                    if n > 10_000 { break; }
+                                }
+                            }
+                            let final_name = final_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(new_name.clone());
                             let handle = s.handle.clone();
                             let old = old_path.clone();
+                            let to = final_path.clone();
                             std::thread::spawn(move || {
-                                let res = std::fs::rename(&old, &new_path);
+                                let res = std::fs::rename(&old, &to);
                                 handle.update(move |s, _| {
                                     if res.is_ok() {
-                                        s.status = format!("renamed to {}", new_name);
+                                        s.status = format!("renamed to {}", final_name);
+                                        s.undo_stack.push(UndoAction::Rename { from: old.clone(), to: to.clone() });
                                     } else {
                                         s.status = "rename failed".into();
                                     }
