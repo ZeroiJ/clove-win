@@ -2252,6 +2252,68 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                             s.batch_rename_suffix = TextEdit::new("");
                             s.context_menu = None;
                         }))
+                        .child(ctx_item("Compress", move |s: &mut State| {
+                            // Collect selected paths (or cursor).
+                            let mut paths = Vec::new();
+                            for &idx in &s.selected {
+                                if let Some(e) = s.snapshot.entries.get(idx) {
+                                    if let Some(p) = entry_path(&s.location, e) { paths.push(p); }
+                                }
+                            }
+                            if paths.is_empty() {
+                                if let Some(entry) = s.snapshot.entries.get(idx) {
+                                    if let Some(p) = entry_path(&s.location, entry) { paths.push(p); }
+                                }
+                            }
+                            if !paths.is_empty() {
+                                let target = match &s.location { Location::Folder(d) => d.clone(), _ => PathBuf::from(".") };
+                                let name = paths.first().and_then(|p| p.file_name()).map(|n| format!("{}.tar.gz", n.to_string_lossy())).unwrap_or_else(|| "archive.tar.gz".into());
+                                let dest = target.join(name);
+                                let handle = s.handle.clone();
+                                s.status = "compressing...".into();
+                                std::thread::spawn(move || {
+                                    // Use tar with -C parent and relative names.
+                                    let mut args = vec!["czf".to_string(), dest.to_string_lossy().to_string()];
+                                    for p in &paths {
+                                        args.push(p.to_string_lossy().to_string());
+                                    }
+                                    let res = std::process::Command::new("tar").args(&args).status();
+                                    handle.update(move |s, _| {
+                                        s.status = if res.map(|r| r.success()).unwrap_or(false) { "compressed".into() } else { "compress failed".into() };
+                                        reload(s);
+                                    });
+                                });
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Extract Here", move |s: &mut State| {
+                            if let Some(entry) = s.snapshot.entries.get(idx) {
+                                if let Some(path) = entry_path(&s.location, entry) {
+                                    let lower = path.to_string_lossy().to_lowercase();
+                                    let is_archive = lower.ends_with(".zip") || lower.ends_with(".tar.gz") || lower.ends_with(".tgz") || lower.ends_with(".tar") || lower.ends_with(".tar.bz2") || lower.ends_with(".tar.xz") || lower.ends_with(".7z");
+                                    if is_archive {
+                                        let target = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+                                        let handle = s.handle.clone();
+                                        let p = path.clone();
+                                        s.status = "extracting...".into();
+                                        std::thread::spawn(move || {
+                                            let res = if p.to_string_lossy().ends_with(".zip") {
+                                                std::process::Command::new("unzip").args(["-o", &p.to_string_lossy(), "-d", &target.to_string_lossy()]).status()
+                                            } else {
+                                                std::process::Command::new("tar").args(["xf", &p.to_string_lossy(), "-C", &target.to_string_lossy()]).status()
+                                            };
+                                            handle.update(move |s, _| {
+                                                s.status = if res.map(|r| r.success()).unwrap_or(false) { "extracted".into() } else { "extract failed".into() };
+                                                reload(s);
+                                            });
+                                        });
+                                    } else {
+                                        s.status = "not an archive".into();
+                                    }
+                                }
+                            }
+                            s.context_menu = None;
+                        }))
                         .child(ctx_item("Properties", move |s: &mut State| {
                             if let Some(e) = s.snapshot.entries.get(idx) {
                                 if let Some(p) = entry_path(&s.location, e) {
