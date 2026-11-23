@@ -5,7 +5,7 @@
 # expects (prototypes/_rune-upstream), because clove-rs/Cargo.toml uses path
 # dependencies for Rune and its patched vendor crates.
 
-pkgname=clove
+pkgname=clove-linux
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Fast dithered-storage file manager"

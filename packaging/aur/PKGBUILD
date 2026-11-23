@@ -1,5 +1,5 @@
 # Maintainer: ZeroiJ
-pkgname=clove
+pkgname=clove-linux
 pkgver=0.1.1
 pkgrel=1
 pkgdesc="Fast dithered-storage file manager"

@@ -42,7 +42,7 @@ jobs:
         env:
           GIT_SSH_COMMAND: "ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
         run: |
-          git clone ssh://aur@aur.archlinux.org/clove.git aur-clove
+          git clone ssh://aur@aur.archlinux.org/clove-linux.git aur-clove
           cp packaging/aur/PKGBUILD packaging/aur/.SRCINFO aur-clove/
           cd aur-clove
           git config user.name "github-actions"
