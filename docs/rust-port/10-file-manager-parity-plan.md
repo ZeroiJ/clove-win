@@ -14,8 +14,8 @@ people expect from a daily file manager. Do not lose the no-index, fast-listing 
 
 ## Phase FM1 — Operation safety and feedback (1–2 weeks)
 
-- [~] Conflict handling: paste auto-renames on collision; replace/skip/rename/apply-all dialog still TODO.
-- [~] Progress overlay: `op_progress` state/status skeleton added; full job queue + cancel UI still TODO.
+- [x] Conflict handling: paste auto-renames by default; ask-mode modal with Replace/Skip/Rename/Cancel.
+- [x] Progress overlay: paste reports progress, cancel via Esc/button.
 - [x] Multi-level undo stack for trash (not only last trash).
 - [x] Context menu: Open, Open With (app chooser), Copy, Cut, Paste, Copy Path, New File, New Folder, Terminal Here, Reveal, Delete (undo-aware), Rename, Batch Rename, Compress, Extract, Properties.
 - [x] New empty file creation (context menu + Ctrl+?).
