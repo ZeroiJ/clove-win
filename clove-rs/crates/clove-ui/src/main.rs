@@ -154,6 +154,10 @@ struct State {
     context_menu: Option<usize>,
     // Batch rename modal.
     batch_rename_open: bool,
+    // Open With modal.
+    open_with_open: bool,
+    open_with_path: Option<PathBuf>,
+    open_with_apps: Vec<(String, PathBuf)>,
     batch_rename_mode: u8,
     batch_rename_find: TextEdit,
     batch_rename_replace: TextEdit,
@@ -660,6 +664,82 @@ fn batch_rename_preview(s: &State) -> Vec<(usize, String)> {
     out
 }
 
+fn open_with_candidates(path: &Path) -> Vec<(String, PathBuf)> {
+    // Determine mime type via xdg-mime if available.
+    let mime = std::process::Command::new("xdg-mime")
+        .args(["query", "filetype"])
+        .arg(path)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    let mut dirs = vec![PathBuf::from("/usr/share/applications"), PathBuf::from("/usr/local/share/applications")];
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".local/share/applications"));
+    }
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("desktop") { continue; }
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            // parse Name and MimeType
+            let mut name = String::new();
+            let mut mimes = String::new();
+            let mut hidden = false;
+            let mut no_display = false;
+            for line in text.lines() {
+                if let Some(v) = line.strip_prefix("Name=") { name = v.to_string(); }
+                if let Some(v) = line.strip_prefix("MimeType=") { mimes = v.to_string(); }
+                if line == "Hidden=true" || line == "NoDisplay=true" { hidden = true; }
+                if line.starts_with("NoDisplay=") { no_display = line.ends_with("true"); }
+            }
+            if hidden || no_display { continue; }
+            if name.is_empty() { name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(); }
+            let matches = if mime.is_empty() {
+                true
+            } else {
+                mimes.split(';').any(|m| m.trim() == mime)
+            };
+            if !matches { continue; }
+            if seen.insert(p.clone()) {
+                out.push((name, p));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn launch_desktop_app(desktop: &Path, file: &Path) {
+    // Try gtk-launch first (handles Exec parsing + field codes).
+    let app_id = desktop.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    if std::process::Command::new("gtk-launch").arg(&app_id).arg(file).spawn().is_ok() {
+        return;
+    }
+    // Fallback: parse Exec line and substitute %f/%F/%u/%U.
+    if let Ok(text) = std::fs::read_to_string(desktop) {
+        for line in text.lines() {
+            if let Some(exec) = line.strip_prefix("Exec=") {
+                let mut cmd = exec.replace("%F", &file.to_string_lossy()).replace("%f", &file.to_string_lossy())
+                    .replace("%U", &file.to_string_lossy()).replace("%u", &file.to_string_lossy());
+                // strip remaining field codes
+                for code in ["%i", "%c", "%k"] { cmd = cmd.replace(code, ""); }
+                let parts: Vec<&str> = cmd.split_whitespace().collect();
+                if parts.is_empty() { break; }
+                let mut c = std::process::Command::new(parts[0]);
+                c.args(&parts[1..]);
+                let _ = c.spawn();
+                break;
+            }
+        }
+    }
+}
 fn apply_batch_rename(s: &mut State) {
     let previews = batch_rename_preview(s);
     if previews.is_empty() { s.status = "nothing to rename".into(); return; }
@@ -1956,6 +2036,55 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         } else {
             col().key("batchrename-off").w(0.0).h(0.0)
         })
+        // Open With modal.
+        .child(if s.open_with_open {
+            col()
+                .key("openwith-overlay")
+                .w_full()
+                .h_full()
+                .center()
+                .child(
+                    col()
+                        .key("openwith-card")
+                        .w(320.0)
+                        .padding(16.0)
+                        .gap(6.0)
+                        .radius(tokens::RADIUS_BAR)
+                        .fill(surface())
+                        .child(text("Open With").font(type_::TITLE).color(ink()))
+                        .child(if s.open_with_apps.is_empty() {
+                            text("No applications found").font(type_::LABEL).color(ink_secondary())
+                        } else {
+                            let apps = s.open_with_apps.clone();
+                            let target = s.open_with_path.clone();
+                            col().gap(2.0).children(apps.into_iter().map(|(name, desktop)| {
+                                let d = desktop.clone();
+                                let target2 = target.clone();
+                                let name2 = name.clone();
+                                el()
+                                    .key(format!("ow-{}", name))
+                                    .w_full()
+                                    .h(24.0)
+                                    .px(8.0)
+                                    .center_y()
+                                    .radius(tokens::RADIUS_CONTROL)
+                                    .child(text(name).font(type_::BODY).color(ink()))
+                                    .on_press(move |s: &mut State| {
+                                        if let Some(p) = &target2 {
+                                            launch_desktop_app(&d, p);
+                                            s.status = format!("opened with {}", name2);
+                                        }
+                                        s.open_with_open = false;
+                                    })
+                            }).collect::<Vec<_>>())
+                        })
+                        .child(el().key("ow-close").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
+                            .child(text("Close").font(type_::BODY).color(ink()))
+                            .on_press(|s: &mut State| { s.open_with_open = false; }))
+                )
+        } else {
+            col().key("openwith-off").w(0.0).h(0.0)
+        })
         // Context menu (right-click).
         .child(if s.context_menu.is_some() {
             let idx = s.context_menu.unwrap();
@@ -1989,8 +2118,10 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                         .child(ctx_item("Open With...", move |s: &mut State| {
                             if let Some(entry) = s.snapshot.entries.get(idx) {
                                 if let Some(path) = entry_path(&s.location, entry) {
-                                    platform::open_path(&path);
-                                    s.status = "Open With: using default app (chooser TODO)".into();
+                                    let apps = open_with_candidates(&path);
+                                    s.open_with_path = Some(path);
+                                    s.open_with_apps = apps;
+                                    s.open_with_open = true;
                                 }
                             }
                             s.context_menu = None;
@@ -2339,6 +2470,9 @@ fn build_state(handle: AppHandle<State>) -> State {
         rename_text: TextEdit::new(""),
         context_menu: None,
         batch_rename_open: false,
+        open_with_open: false,
+        open_with_path: None,
+        open_with_apps: Vec::new(),
         batch_rename_mode: 0,
         batch_rename_find: TextEdit::new(""),
         batch_rename_replace: TextEdit::new(""),
