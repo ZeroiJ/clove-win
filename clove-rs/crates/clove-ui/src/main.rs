@@ -173,6 +173,7 @@ struct State {
     undo_stack: Vec<UndoAction>,
     /// Active file operation progress (copy/move/delete/extract).
     op_progress: Option<FileOpProgress>,
+    op_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     bar: Pixels,
     bar_renderer: BarRenderer,
     bar_time: f32,
@@ -858,12 +859,33 @@ fn do_paste(s: &mut State) {
     }
     let cut = s.clipboard_cut;
     let handle = s.handle.clone();
+    let cancel = s.op_cancel.clone();
+    cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+    let total = paths.len();
+    s.op_progress = Some(FileOpProgress {
+        label: "Pasting".into(),
+        done: 0,
+        total,
+        bytes_done: 0,
+        bytes_total: 0,
+        failures: 0,
+        cancelled: false,
+    });
     s.status = "pasting...".into();
     std::thread::spawn(move || {
         let mut moved = 0usize;
         let mut skipped = 0usize;
         let mut failures = 0usize;
-        for src in &paths {
+        for (i, src) in paths.iter().enumerate() {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                handle.update(move |s, _| {
+                    s.op_progress = None;
+                    s.status = format!("cancelled · pasted {} · skipped {} · failed {}", moved, skipped, failures);
+                    s.wake_bar();
+                    reload(s);
+                });
+                return;
+            }
             let Some(name) = src.file_name() else { failures += 1; continue; };
             let mut dest = target.join(name);
             if dest.exists() {
@@ -890,11 +912,19 @@ fn do_paste(s: &mut State) {
                 std::fs::copy(src, &dest).map(|_| ())
             };
             if res.is_ok() { moved += 1; } else { failures += 1; }
+            let done = i + 1;
+            handle.update(move |s, _| {
+                if let Some(op) = &mut s.op_progress {
+                    op.done = done;
+                    op.failures = failures;
+                }
+            });
         }
         if cut {
             // clear internal clipboard after successful cut
         }
         handle.update(move |s, _| {
+            s.op_progress = None;
             s.status = format!("pasted {} · skipped {} · failed {}", moved, skipped, failures);
             s.wake_bar();
             if cut { s.clipboard.clear(); s.clipboard_cut = false; }
@@ -1201,6 +1231,10 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             true
         }
         Key::Escape => {
+            if s.op_progress.is_some() {
+                s.op_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
             if s.context_menu.is_some() {
                 s.context_menu = None;
                 return true;
@@ -1748,7 +1782,14 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                     .key("status")
                     .font(type_::LABEL)
                     .color(ink_secondary()),
-                ),
+                )
+                .child(if s.op_progress.is_some() {
+                    el().key("op-cancel-btn").w(60.0).h(18.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
+                        .child(text("Cancel").font(type_::LABEL).color(ink()))
+                        .on_press(|s: &mut State| { s.op_cancel.store(true, std::sync::atomic::Ordering::Relaxed); })
+                } else {
+                    el().key("op-cancel-off").w(0.0).h(0.0)
+                }),
         )
         // The signature: Clove's dithered storage bar.
         .child(
@@ -2549,6 +2590,7 @@ fn build_state(handle: AppHandle<State>) -> State {
         loading: false,
         undo_stack: Vec::new(),
         op_progress: None,
+        op_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         bar,
         bar_renderer,
         bar_time: 0.0,
