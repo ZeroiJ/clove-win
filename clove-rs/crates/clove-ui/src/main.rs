@@ -152,6 +152,9 @@ struct State {
     renaming: Option<usize>,
     rename_text: TextEdit,
     context_menu: Option<usize>,
+    // Conflict resolution.
+    conflict_policy: u8, // 0 auto-rename, 1 ask
+    pending_paste: Option<(PathBuf, Vec<PathBuf>, bool)>,
     // Batch rename modal.
     batch_rename_open: bool,
     // Open With modal.
@@ -857,7 +860,20 @@ fn do_paste(s: &mut State) {
         s.status = "clipboard empty".into();
         return;
     }
-    let cut = s.clipboard_cut;
+    if s.conflict_policy == 1 {
+        let has_collision = paths.iter().any(|src| {
+            src.file_name().map(|n| target.join(n).exists()).unwrap_or(false)
+        });
+        if has_collision {
+            s.pending_paste = Some((target, paths, s.clipboard_cut));
+            s.status = "resolve conflicts".into();
+            return;
+        }
+    }
+    run_paste(s, target, paths, s.clipboard_cut, 0);
+}
+
+fn run_paste(s: &mut State, target: PathBuf, paths: Vec<PathBuf>, cut: bool, mode: u8) {
     let handle = s.handle.clone();
     let cancel = s.op_cancel.clone();
     cancel.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -889,16 +905,25 @@ fn do_paste(s: &mut State) {
             let Some(name) = src.file_name() else { failures += 1; continue; };
             let mut dest = target.join(name);
             if dest.exists() {
-                let stem = dest.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
-                let ext = dest.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-                let mut n = 1u32;
-                loop {
-                    let cand = target.join(format!("{stem} ({n}){ext}"));
-                    if !cand.exists() { dest = cand; break; }
-                    n += 1;
-                    if n > 10_000 { skipped += 1; break; }
+                match mode {
+                    1 => { /* replace: keep dest */ }
+                    2 => { skipped += 1; continue; }
+                    _ => {
+                        let stem = dest.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+                        let ext = dest.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+                        let mut n = 1u32;
+                        loop {
+                            let cand = target.join(format!("{stem} ({n}){ext}"));
+                            if !cand.exists() { dest = cand; break; }
+                            n += 1;
+                            if n > 10_000 { skipped += 1; break; }
+                        }
+                        if n > 10_000 { continue; }
+                    }
                 }
-                if n > 10_000 { continue; }
+            }
+            if mode == 1 && dest.exists() {
+                if dest.is_dir() { let _ = std::fs::remove_dir_all(&dest); } else { let _ = std::fs::remove_file(&dest); }
             }
             let res = if src.is_dir() {
                 if cut {
@@ -920,9 +945,6 @@ fn do_paste(s: &mut State) {
                 }
             });
         }
-        if cut {
-            // clear internal clipboard after successful cut
-        }
         handle.update(move |s, _| {
             s.op_progress = None;
             s.status = format!("pasted {} · skipped {} · failed {}", moved, skipped, failures);
@@ -933,7 +955,6 @@ fn do_paste(s: &mut State) {
     });
 }
 
-// ---------------------------------------------------------------- input
 
 fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     // Ctrl+Z (Cmd+Z on macOS) restores the last trashed selection. It has to be claimed
@@ -2126,6 +2147,56 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         } else {
             col().key("openwith-off").w(0.0).h(0.0)
         })
+        // Conflict resolution modal.
+        .child(if s.pending_paste.is_some() {
+            let (target, paths, cut) = s.pending_paste.clone().unwrap();
+            let collisions: Vec<String> = paths.iter().filter_map(|src| {
+                let name = src.file_name()?.to_string_lossy().to_string();
+                if target.join(&name).exists() { Some(name) } else { None }
+            }).collect();
+            col()
+                .key("conflict-overlay")
+                .w_full()
+                .h_full()
+                .center()
+                .child(
+                    col()
+                        .key("conflict-card")
+                        .w(360.0)
+                        .padding(16.0)
+                        .gap(8.0)
+                        .radius(tokens::RADIUS_BAR)
+                        .fill(surface())
+                        .child(text("Resolve Conflicts").font(type_::TITLE).color(ink()))
+                        .child(text(format!("{} item(s) collide", collisions.len())).font(type_::LABEL).color(ink_secondary()))
+                        .child(col().gap(2.0).children(collisions.into_iter().take(6).map(|n| text(n).font(type_::BODY).color(ink())).collect::<Vec<_>>()))
+                        .child(row().gap(6.0)
+                            .child(el().key("cf-replace").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
+                                .child(text("Replace").font(type_::BODY).color(ink()))
+                                .on_press(move |s: &mut State| {
+                                    let (t, p, c) = s.pending_paste.take().unwrap();
+                                    run_paste(s, t, p, c, 1);
+                                }))
+                            .child(el().key("cf-skip").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
+                                .child(text("Skip").font(type_::BODY).color(ink()))
+                                .on_press(move |s: &mut State| {
+                                    let (t, p, c) = s.pending_paste.take().unwrap();
+                                    run_paste(s, t, p, c, 2);
+                                }))
+                            .child(el().key("cf-rename").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
+                                .child(text("Rename").font(type_::BODY).color(ink()))
+                                .on_press(move |s: &mut State| {
+                                    let (t, p, c) = s.pending_paste.take().unwrap();
+                                    run_paste(s, t, p, c, 0);
+                                }))
+                        )
+                        .child(el().key("cf-cancel").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
+                            .child(text("Cancel").font(type_::BODY).color(ink()))
+                            .on_press(|s: &mut State| { s.pending_paste = None; s.status = "cancelled".into(); }))
+                )
+        } else {
+            col().key("conflict-off").w(0.0).h(0.0)
+        })
         // Context menu (right-click).
         .child(if s.context_menu.is_some() {
             let idx = s.context_menu.unwrap();
@@ -2365,6 +2436,11 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                             }
                             s.context_menu = None;
                         }))
+                        .child(ctx_item("Toggle Conflict Policy", move |s: &mut State| {
+                            s.conflict_policy = if s.conflict_policy == 0 { 1 } else { 0 };
+                            s.status = if s.conflict_policy == 0 { "conflicts: auto-rename".into() } else { "conflicts: ask".into() };
+                            s.context_menu = None;
+                        }))
                         .child(ctx_item("Close", move |s: &mut State| {
                             s.context_menu = None;
                         })),
@@ -2572,6 +2648,8 @@ fn build_state(handle: AppHandle<State>) -> State {
         renaming: None,
         rename_text: TextEdit::new(""),
         context_menu: None,
+        conflict_policy: 0,
+        pending_paste: None,
         batch_rename_open: false,
         open_with_open: false,
         open_with_path: None,
