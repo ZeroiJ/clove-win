@@ -12,7 +12,7 @@ people expect from a daily file manager. Do not lose the no-index, fast-listing 
 - Browse, filter, sort, grid/list/details, tabs, multi-select, rename, properties, preview,
   context menu (partial), trash/undo, storage scan + bar, bookmarks-free quick access.
 
-## Phase FM1 — Operation safety and feedback (1–2 weeks)
+## Phase FM1 — Operation safety and feedback (1–2 weeks)  [mostly complete]
 
 - [x] Conflict handling: paste auto-renames by default; ask-mode modal with Replace/Skip/Rename/Cancel.
 - [x] Progress overlay: paste reports progress, cancel via Esc/button.
