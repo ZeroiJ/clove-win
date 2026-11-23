@@ -332,6 +332,7 @@ pub fn scan_roots(
     kind: StorageKind,
     roots: &[PathBuf],
     cancel: &AtomicBool,
+    seen: Option<&std::sync::Mutex<std::collections::HashSet<(u64, u64)>>>,
     mut progress: impl FnMut(KindProgress),
 ) -> KindReport {
     let started = Instant::now();
@@ -388,9 +389,36 @@ pub fn scan_roots(
                 }
             }
 
-            let size = item.metadata().map(|m| m.len()).unwrap_or(0);
+            let metadata = item.metadata().ok();
+            #[cfg(target_os = "linux")]
+            let size = metadata
+                .as_ref()
+                .map(|m| {
+                    use std::os::unix::fs::MetadataExt;
+                    let blocks = m.blocks();
+                    if blocks > 0 {
+                        blocks * 512
+                    } else {
+                        m.len()
+                    }
+                })
+                .unwrap_or(0);
+            #[cfg(not(target_os = "linux"))]
+            let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
             if size == 0 {
                 continue;
+            }
+
+            #[cfg(target_os = "linux")]
+            if let Some(seen) = seen {
+                if let Some(meta) = metadata.as_ref() {
+                    use std::os::unix::fs::MetadataExt;
+                    let key = (meta.dev(), meta.ino());
+                    let mut guard = seen.lock().unwrap();
+                    if !guard.insert(key) {
+                        continue;
+                    }
+                }
             }
             report.bytes += size;
             report.files += 1;
@@ -424,7 +452,7 @@ pub fn scan_kind(
     cancel: &AtomicBool,
     progress: impl FnMut(KindProgress),
 ) -> KindReport {
-    scan_roots(kind, &kind.roots(), cancel, progress)
+    scan_roots(kind, &kind.roots(), cancel, None, progress)
 }
 
 /// One event from a running [`StorageScan`].
@@ -466,6 +494,7 @@ impl StorageScan {
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, events) = mpsc::channel();
         let queue = Arc::new(Mutex::new(VecDeque::from(jobs)));
+        let seen = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let worker_count = WORKERS.min(queue.lock().map(|q| q.len()).unwrap_or(0)).max(1);
         let mut workers = Vec::with_capacity(worker_count);
 
@@ -473,13 +502,14 @@ impl StorageScan {
             let tx = tx.clone();
             let queue = queue.clone();
             let cancel = cancel.clone();
+            let seen = seen.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("clove-storage-{index}"))
                 .spawn(move || {
                     loop {
                         let next = queue.lock().ok().and_then(|mut queue| queue.pop_front());
                         let Some((kind, roots)) = next else { break };
-                        let report = scan_roots(kind, &roots, &cancel, |progress| {
+                        let report = scan_roots(kind, &roots, &cancel, Some(&seen), |progress| {
                             let _ = tx.send(ScanEvent::Progress(progress));
                         });
                         let _ = tx.send(ScanEvent::Done(report));
@@ -582,8 +612,8 @@ mod tests {
         std::fs::write(dir.join("a").join("two.bin"), vec![0u8; 200]).unwrap();
         std::fs::write(dir.join("a").join("b").join("three.bin"), vec![0u8; 300]).unwrap();
 
-        let report = scan_roots(StorageKind::Documents, &[dir.clone()], &not_cancelled(), |_| {});
-        assert_eq!(report.bytes, 600);
+        let report = scan_roots(StorageKind::Documents, &[dir.clone()], &not_cancelled(), None, |_| {});
+        assert!(report.bytes >= 600);
         assert_eq!(report.files, 3);
         assert!(!report.restricted);
 
@@ -593,7 +623,7 @@ mod tests {
     #[test]
     fn missing_root_is_skipped_not_restricted() {
         let dir = temp_dir("missing").join("not-there");
-        let report = scan_roots(StorageKind::Documents, &[dir], &not_cancelled(), |_| {});
+        let report = scan_roots(StorageKind::Documents, &[dir], &not_cancelled(), None, |_| {});
         assert_eq!(report.bytes, 0);
         assert!(!report.restricted);
     }
@@ -604,7 +634,7 @@ mod tests {
         std::fs::write(dir.join("file.bin"), vec![0u8; 64]).unwrap();
         let cancel = AtomicBool::new(true);
 
-        let report = scan_roots(StorageKind::Documents, &[dir.clone()], &cancel, |_| {});
+        let report = scan_roots(StorageKind::Documents, &[dir.clone()], &cancel, None, |_| {});
         assert_eq!(report.bytes, 0);
         assert_eq!(report.files, 0);
 
@@ -617,8 +647,8 @@ mod tests {
         std::fs::write(dir.join("$IABC123.txt"), vec![0u8; 120]).unwrap();
         std::fs::write(dir.join("$RABC123.txt"), vec![0u8; 700]).unwrap();
 
-        let report = scan_roots(StorageKind::Trash, &[dir.clone()], &not_cancelled(), |_| {});
-        assert_eq!(report.bytes, 700);
+        let report = scan_roots(StorageKind::Trash, &[dir.clone()], &not_cancelled(), None, |_| {});
+        assert!(report.bytes >= 700);
         assert_eq!(report.files, 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -648,9 +678,9 @@ mod tests {
 
         assert_eq!(reports.len(), 2);
         assert_eq!(reports[0].kind, StorageKind::Documents);
-        assert_eq!(reports[0].bytes, 222);
+        assert!(reports[0].bytes >= 222);
         assert_eq!(reports[1].kind, StorageKind::Music);
-        assert_eq!(reports[1].bytes, 111);
+        assert!(reports[1].bytes >= 111);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

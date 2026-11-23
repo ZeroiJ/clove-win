@@ -1,8 +1,10 @@
 <div align="center">
 
-# Clove for Windows
+# Clove for ~~Windows~~ Linux
 
-**A fast, standalone file manager for Windows 11, written in Rust.**
+**A fast, standalone file manager for Linux (Arch/Omarchy), written in Rust.**
+
+None of my clanmates were there for Destiny raids, so I ditched Windows and ported it back to Omarchy. Now it's for Linux.
 
 Inspired by [Clove](https://github.com/keshav-exe/clove) — the native macOS app I loved but couldn't run because I don't own a Mac. So I ported the idea to Windows 11 and remade the whole thing from scratch in Rust: a single, self-contained `clove.exe` with no runtime dependencies.
 
@@ -80,6 +82,34 @@ clove-rs/
     clove-ui/      the Rune app (the only crate that names a UI framework)
 docs/rust-port/    architecture, framework comparison, roadmap, phase reports
 Clove/             original macOS app (reference)
+```
+
+## Build on Arch / Omarchy
+
+```bash
+git clone https://github.com/ZeroiJ/clove-win.git
+cd clove-win
+git checkout linux-port
+# fetch the pinned Rune checkout (git-ignored, required to build)
+git clone --depth 1 https://github.com/anomalyco/rune.git prototypes/_rune-upstream
+# pin to db301c06ab0d68b70c4822a542fffc6615bbd419
+
+cd clove-rs
+cargo build -p clove-ui --release
+./target/release/clove
+```
+
+Or install locally:
+
+```bash
+./scripts/install-arch.sh
+```
+
+Headless engine tests:
+
+```bash
+cd clove-rs
+cargo test -p clove-fs -p clove-search -p clove-render -p clove-shell
 ```
 
 ## Credits

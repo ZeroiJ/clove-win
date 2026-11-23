@@ -146,6 +146,7 @@ struct State {
     storage_ready: bool,
     storage_has_data: bool,
     bar_width: f32,
+    ui_scale: f32,
     show_hidden: bool,
 }
 
@@ -254,9 +255,13 @@ fn rebuild_bar(s: &mut State) {
             .enumerate()
             .map(|(kind, &bytes)| Segment::kind(kind, bytes as f32 / capacity as f32))
             .collect();
-        BarSpec::new(s.bar_width, segments).with_height(BAR_H)
+        BarSpec::new(s.bar_width, segments)
+            .with_height(BAR_H)
+            .with_scale(s.ui_scale)
     } else {
-        BarSpec::placeholder(s.bar_width).with_height(BAR_H)
+        BarSpec::placeholder(s.bar_width)
+            .with_height(BAR_H)
+            .with_scale(s.ui_scale)
     };
     let mut renderer = BarRenderer::new(spec);
     renderer.render(s.bar_time);
@@ -1400,7 +1405,17 @@ fn ctx_item(label: &'static str, on: impl Fn(&mut State) + 'static) -> El {
         .on_press(move |s: &mut State| on2(s))
 }
 
-fn view(s: &State, _: &mut Cx<State>) -> El {
+fn view(s: &State, cx: &mut Cx<State>) -> El {
+    let scale = cx.env().scale;
+    if (scale - s.ui_scale).abs() > 0.01 {
+        let handle = s.handle.clone();
+        handle.update(move |s, _| {
+            if (s.ui_scale - scale).abs() > 0.01 {
+                s.ui_scale = scale;
+                rebuild_bar(s);
+            }
+        });
+    }
     let count = s.filtered.len();
     let total = s.snapshot.len();
 
@@ -1993,9 +2008,13 @@ fn build_state(handle: AppHandle<State>) -> State {
             .enumerate()
             .map(|(kind, &bytes)| Segment::kind(kind, bytes as f32 / capacity as f32))
             .collect();
-        BarSpec::new(936.0, segments).with_height(BAR_H)
+        BarSpec::new(936.0, segments)
+            .with_height(BAR_H)
+            .with_scale(2.0)
     } else {
-        BarSpec::placeholder(936.0).with_height(BAR_H)
+        BarSpec::placeholder(936.0)
+            .with_height(BAR_H)
+            .with_scale(2.0)
     };
     let mut bar_renderer = BarRenderer::new(spec);
     bar_renderer.render(0.0);
@@ -2062,6 +2081,7 @@ fn build_state(handle: AppHandle<State>) -> State {
         storage_ready,
         storage_has_data,
         bar_width: 936.0,
+        ui_scale: 2.0,
     }
 }
 
