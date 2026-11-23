@@ -152,6 +152,13 @@ struct State {
     renaming: Option<usize>,
     rename_text: TextEdit,
     context_menu: Option<usize>,
+    // Batch rename modal.
+    batch_rename_open: bool,
+    batch_rename_mode: u8,
+    batch_rename_find: TextEdit,
+    batch_rename_replace: TextEdit,
+    batch_rename_prefix: TextEdit,
+    batch_rename_suffix: TextEdit,
     thumbnails: std::collections::HashMap<PathBuf, (u32, u32, Vec<u8>)>,
     thumbnail_pending: std::collections::HashSet<PathBuf>,
     tabs: Vec<Location>,
@@ -606,6 +613,77 @@ fn undo_delete(s: &mut State) {
     });
 }
 
+fn batch_rename_targets(s: &State) -> Vec<usize> {
+    if s.selected.is_empty() {
+        if let Some(&idx) = s.filtered.get(s.cursor) { vec![idx] } else { vec![] }
+    } else {
+        s.selected.iter().copied().collect()
+    }
+}
+
+fn batch_rename_preview(s: &State) -> Vec<(usize, String)> {
+    let targets = batch_rename_targets(s);
+    let mut out = Vec::new();
+    let mut n = 1u32;
+    let start = s.batch_rename_suffix.text.parse::<u32>().ok().unwrap_or(1); // reuse suffix? no
+    let _ = start;
+    for &idx in &targets {
+        let Some(entry) = s.snapshot.entries.get(idx) else { continue };
+        let old = entry.name.clone();
+        let new_name = match s.batch_rename_mode {
+            0 => {
+                let find = s.batch_rename_find.text.as_str();
+                let repl = s.batch_rename_replace.text.as_str();
+                if find.is_empty() { old.clone() } else { old.replace(find, repl) }
+            }
+            1 => format!("{}{}", s.batch_rename_prefix.text, old),
+            2 => {
+                // suffix before extension
+                if let Some(dot) = old.rfind('.') {
+                    format!("{}{}{}", &old[..dot], s.batch_rename_suffix.text, &old[dot..])
+                } else {
+                    format!("{}{}", old, s.batch_rename_suffix.text)
+                }
+            }
+            3 => {
+                let prefix = s.batch_rename_prefix.text.as_str();
+                let suffix = s.batch_rename_suffix.text.as_str();
+                format!("{}{}{}", prefix, n, suffix)
+            }
+            _ => old.clone(),
+        };
+        if s.batch_rename_mode == 3 { n += 1; }
+        if new_name != old && !new_name.is_empty() {
+            out.push((idx, new_name));
+        }
+    }
+    out
+}
+
+fn apply_batch_rename(s: &mut State) {
+    let previews = batch_rename_preview(s);
+    if previews.is_empty() { s.status = "nothing to rename".into(); return; }
+    let handle = s.handle.clone();
+    let items: Vec<(PathBuf, PathBuf)> = previews.iter().filter_map(|(idx, new_name)| {
+        let entry = s.snapshot.entries.get(*idx)?;
+        let old = entry_path(&s.location, entry)?;
+        let parent = old.parent()?.to_path_buf();
+        Some((old, parent.join(new_name)))
+    }).collect();
+    s.status = format!("renaming {} items...", items.len());
+    std::thread::spawn(move || {
+        let mut done = 0usize;
+        let mut fail = 0usize;
+        for (old, newp) in &items {
+            if std::fs::rename(old, newp).is_ok() { done += 1; } else { fail += 1; }
+        }
+        handle.update(move |s, _| {
+            s.status = format!("renamed {} · {} failed", done, fail);
+            s.batch_rename_open = false;
+            reload(s);
+        });
+    });
+}
 fn dir_size(path: &Path) -> u64 {
     let mut total = 0u64;
     if let Ok(rd) = std::fs::read_dir(path) {
@@ -680,6 +758,71 @@ fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn do_paste(s: &mut State) {
+    let target = match &s.location {
+        Location::Folder(d) => d.clone(),
+        _ => { s.status = "paste not supported here".into(); return; }
+    };
+    let mut paths = s.clipboard.clone();
+    if paths.is_empty() {
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            if let Ok(fl) = cb.get().file_list() {
+                paths = fl;
+                s.clipboard_cut = false;
+            }
+        }
+    }
+    if paths.is_empty() {
+        s.status = "clipboard empty".into();
+        return;
+    }
+    let cut = s.clipboard_cut;
+    let handle = s.handle.clone();
+    s.status = "pasting...".into();
+    std::thread::spawn(move || {
+        let mut moved = 0usize;
+        let mut skipped = 0usize;
+        let mut failures = 0usize;
+        for src in &paths {
+            let Some(name) = src.file_name() else { failures += 1; continue; };
+            let mut dest = target.join(name);
+            if dest.exists() {
+                let stem = dest.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+                let ext = dest.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+                let mut n = 1u32;
+                loop {
+                    let cand = target.join(format!("{stem} ({n}){ext}"));
+                    if !cand.exists() { dest = cand; break; }
+                    n += 1;
+                    if n > 10_000 { skipped += 1; break; }
+                }
+                if n > 10_000 { continue; }
+            }
+            let res = if src.is_dir() {
+                if cut {
+                    std::fs::rename(src, &dest).or_else(|_| { copy_dir(src, &dest).and_then(|_| std::fs::remove_dir_all(src)) })
+                } else {
+                    copy_dir(src, &dest)
+                }
+            } else if cut {
+                std::fs::rename(src, &dest).or_else(|_| { std::fs::copy(src, &dest).and_then(|_| std::fs::remove_file(src)) })
+            } else {
+                std::fs::copy(src, &dest).map(|_| ())
+            };
+            if res.is_ok() { moved += 1; } else { failures += 1; }
+        }
+        if cut {
+            // clear internal clipboard after successful cut
+        }
+        handle.update(move |s, _| {
+            s.status = format!("pasted {} · skipped {} · failed {}", moved, skipped, failures);
+            s.wake_bar();
+            if cut { s.clipboard.clear(); s.clipboard_cut = false; }
+            reload(s);
+        });
+    });
+}
+
 // ---------------------------------------------------------------- input
 
 fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
@@ -732,71 +875,7 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     }
     // Ctrl+V: paste.
     if ev.is_command('v') {
-        let target = match &s.location {
-            Location::Folder(d) => d.clone(),
-            _ => {
-                s.status = "paste not supported here".into();
-                return true;
-            }
-        };
-        let mut paths = s.clipboard.clone();
-        if paths.is_empty() {
-            if let Ok(mut cb) = arboard::Clipboard::new() {
-                if let Ok(fl) = cb.get().file_list() {
-                    paths = fl;
-                    s.clipboard_cut = false;
-                }
-            }
-        }
-        if paths.is_empty() {
-            s.status = "clipboard empty".into();
-            return true;
-        }
-        let cut = s.clipboard_cut;
-        let handle = s.handle.clone();
-        s.status = "pasting...".into();
-        std::thread::spawn(move || {
-            let mut moved = 0usize;
-            let mut skipped = 0usize;
-            let mut failures = 0usize;
-            for src in &paths {
-                let Some(name) = src.file_name() else { failures += 1; continue; };
-                let mut dest = target.join(name);
-                if dest.exists() {
-                    let stem = dest.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
-                    let ext = dest.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-                    let mut n = 1u32;
-                    loop {
-                        let cand = target.join(format!("{stem} ({n}){ext}"));
-                        if !cand.exists() { dest = cand; break; }
-                        n += 1;
-                        if n > 10_000 { skipped += 1; break; }
-                    }
-                    if n > 10_000 { continue; }
-                }
-                let res = if src.is_dir() {
-                    if cut {
-                        std::fs::rename(src, &dest).or_else(|_| { copy_dir(src, &dest).and_then(|_| std::fs::remove_dir_all(src)) })
-                    } else {
-                        copy_dir(src, &dest)
-                    }
-                } else if cut {
-                    std::fs::rename(src, &dest).or_else(|_| { std::fs::copy(src, &dest).and_then(|_| std::fs::remove_file(src)) })
-                } else {
-                    std::fs::copy(src, &dest).map(|_| ())
-                };
-                if res.is_ok() { moved += 1; } else { failures += 1; }
-            }
-            if cut {
-                // clear internal clipboard after successful cut
-            }
-            handle.update(move |s, _| {
-                s.status = format!("pasted {} · skipped {} · failed {}", moved, skipped, failures);
-                s.wake_bar();
-                // refresh listing
-                reload(s);
-            });
-        });
+        do_paste(s);
         return true;
     }
     // Ctrl+Shift+N: new folder.
@@ -1837,6 +1916,46 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         } else {
             col().key("props-off").w(0.0).h(0.0)
         })
+        // Batch rename modal.
+        .child(if s.batch_rename_open {
+            let previews = batch_rename_preview(s);
+            col()
+                .key("batchrename-overlay")
+                .w_full()
+                .h_full()
+                .center()
+                .child(
+                    col()
+                        .key("batchrename-card")
+                        .w(460.0)
+                        .padding(16.0)
+                        .gap(8.0)
+                        .radius(tokens::RADIUS_BAR)
+                        .fill(surface())
+                        .child(text("Batch Rename").font(type_::TITLE).color(ink()))
+                        .child(row().gap(4.0)
+                            .child(ctx_item("Replace", |_| {})) // placeholder spacer
+                        )
+                        .child(text("Mode: 0=replace 1=prefix 2=suffix 3=numbering").font(type_::LABEL).color(ink_secondary()))
+                        .child(text_input(&s.batch_rename_find, type_::BODY).key("br-find").on_edit(|s: &mut State| &mut s.batch_rename_find))
+                        .child(text_input(&s.batch_rename_replace, type_::BODY).key("br-repl").on_edit(|s: &mut State| &mut s.batch_rename_replace))
+                        .child(text_input(&s.batch_rename_prefix, type_::BODY).key("br-pref").on_edit(|s: &mut State| &mut s.batch_rename_prefix))
+                        .child(text_input(&s.batch_rename_suffix, type_::BODY).key("br-suff").on_edit(|s: &mut State| &mut s.batch_rename_suffix))
+                        .child(text(format!("Preview: {} items", previews.len())).font(type_::LABEL).color(ink_secondary()))
+                        .child(
+                            col().gap(2.0).children(previews.iter().take(8).map(|(_, n)| text(n.clone()).font(type_::BODY).color(ink())).collect::<Vec<_>>())
+                        )
+                        .child(row().gap(8.0)
+                            .child(el().key("br-apply").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
+                                .child(text("Apply").font(type_::BODY).color(ink()))
+                                .on_press(|s: &mut State| { apply_batch_rename(s); }))
+                            .child(el().key("br-cancel").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
+                                .child(text("Cancel").font(type_::BODY).color(ink()))
+                                .on_press(|s: &mut State| { s.batch_rename_open = false; })))
+                )
+        } else {
+            col().key("batchrename-off").w(0.0).h(0.0)
+        })
         // Context menu (right-click).
         .child(if s.context_menu.is_some() {
             let idx = s.context_menu.unwrap();
@@ -1885,6 +2004,40 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                                     std::thread::spawn(move || { if let Ok(mut cb) = arboard::Clipboard::new() { let _ = cb.set().file_list(&[p2]); } });
                                     s.status = "copied 1 item".into();
                                 }
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Cut", move |s: &mut State| {
+                            if let Some(entry) = s.snapshot.entries.get(idx) {
+                                if let Some(path) = entry_path(&s.location, entry) {
+                                    s.clipboard = vec![path.clone()];
+                                    s.clipboard_cut = true;
+                                    let p2 = path.clone();
+                                    std::thread::spawn(move || { if let Ok(mut cb) = arboard::Clipboard::new() { let _ = cb.set().file_list(&[p2]); } });
+                                    s.status = "cut 1 item".into();
+                                }
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Paste", move |s: &mut State| {
+                            do_paste(s);
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Reveal in Folder", move |s: &mut State| {
+                            let mut parent_opt = None;
+                            let mut name = String::new();
+                            if let Some(entry) = s.snapshot.entries.get(idx) {
+                                if let Some(path) = entry_path(&s.location, entry) {
+                                    if let Some(parent) = path.parent() {
+                                        parent_opt = Some(parent.to_path_buf());
+                                        name = entry.name.clone();
+                                    }
+                                }
+                            }
+                            if let Some(parent) = parent_opt {
+                                navigate(s, Location::Folder(parent));
+                                sync_address(s);
+                                s.status = format!("revealed {}", name);
                             }
                             s.context_menu = None;
                         }))
@@ -1958,6 +2111,14 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                             if let Some(e) = s.snapshot.entries.get(idx) {
                                 s.rename_text = TextEdit::new(&e.name);
                             }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Batch Rename...", move |s: &mut State| {
+                            s.batch_rename_open = true;
+                            s.batch_rename_find = TextEdit::new("");
+                            s.batch_rename_replace = TextEdit::new("");
+                            s.batch_rename_prefix = TextEdit::new("");
+                            s.batch_rename_suffix = TextEdit::new("");
                             s.context_menu = None;
                         }))
                         .child(ctx_item("Properties", move |s: &mut State| {
@@ -2177,6 +2338,12 @@ fn build_state(handle: AppHandle<State>) -> State {
         renaming: None,
         rename_text: TextEdit::new(""),
         context_menu: None,
+        batch_rename_open: false,
+        batch_rename_mode: 0,
+        batch_rename_find: TextEdit::new(""),
+        batch_rename_replace: TextEdit::new(""),
+        batch_rename_prefix: TextEdit::new(""),
+        batch_rename_suffix: TextEdit::new(""),
         thumbnails: std::collections::HashMap::new(),
         thumbnail_pending: std::collections::HashSet::new(),
         tabs: vec![Location::ThisPc],
