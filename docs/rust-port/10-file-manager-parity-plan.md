@@ -1,7 +1,6 @@
 # 10 · File-manager parity plan — make Clove a real file manager
 
-Status: **planning**. This is the next track after the Arch port. It turns Clove from a
-storage-bar browser into a full file manager comparable to Nautilus/Dolphin/Explorer.
+Status: **FM1 active**. This track turns Clove from a storage-bar browser into a full file manager comparable to Nautilus (Omarchy default), while keeping Clove identity.
 
 ## Goal
 
@@ -15,14 +14,13 @@ people expect from a daily file manager. Do not lose the no-index, fast-listing 
 
 ## Phase FM1 — Operation safety and feedback (1–2 weeks)
 
-- [ ] Conflict dialog: replace / skip / rename / apply-to-all on copy/move.
-- [ ] Progress overlay: bytes, files, speed, cancel, per-operation.
-- [ ] Multi-level undo stack (not only last trash).
-- [ ] Full context menu: Open, Open With, Copy, Cut, Paste, Delete, Rename, New File/Folder,
-      Properties, Compress, Extract, Terminal Here, Copy Path, Reveal.
-- [ ] New empty file creation.
+- [~] Conflict handling: paste auto-renames on collision; replace/skip/rename/apply-all dialog still TODO.
+- [~] Progress overlay: `op_progress` state/status skeleton added; job queue + cancel UI TODO.
+- [x] Multi-level undo stack for trash (not only last trash).
+- [~] Context menu: Open, Open With placeholder, Copy, Copy Path, New File, New Folder, Terminal Here, Delete (undo-aware), Rename, Properties. Still TODO: Cut/Paste in menu, Compress, Extract, Reveal.
+- [x] New empty file creation (context menu).
 - [ ] Batch rename with preview.
-- [ ] `Open With` via xdg-open/mimeapps.
+- [~] `Open With` via xdg-open/mimeapps: default-app placeholder wired; chooser TODO.
 
 ## Phase FM2 — Navigation and layout (1–2 weeks)
 
@@ -74,10 +72,10 @@ people expect from a daily file manager. Do not lose the no-index, fast-listing 
 3. FM3 after that: thumbnails and git badges are visible wins.
 4. FM4/FM5 last: power features and polish.
 
-## Open decisions
+## Decisions (resolved)
 
-- Mirror which file manager most closely: Nautilus, Dolphin, or Explorer?
-- Split view: side-by-side only, or optional top/bottom?
-- Git badges: subtle icon only, or full status column?
-- Archive browsing: read-only first, or extract-on-navigate?
-- Network support in v1, or defer to v2?
+- **Mirror**: Nautilus (Omarchy file manager). Live dithered bar stays always at top.
+- **Split view**: no, not now. Revisit post-FM2.
+- **Git badges**: icons only, subtle; no full status column in FM1.
+- **Archives**: extract on navigate (FM3).
+- **Network support**: defer to FM2 optional/feature-gated (gvfs/gio/udisks integration later). Not FM1 blocker; local + mounted volumes first.

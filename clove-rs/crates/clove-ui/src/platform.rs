@@ -110,6 +110,44 @@ pub fn open_path(path: &Path) {
     }
 }
 
+pub fn open_terminal_here(dir: &Path) {
+    #[cfg(target_os = "linux")]
+    {
+        // Try common terminal emulators; Omarchy/Arch users often have one of these.
+        let candidates: &[(&str, &[&str])] = &[
+            ("xdg-terminal-exec", &[]),
+            ("ghostty", &["--working-directory"]),
+            ("foot", &["--working-directory"]),
+            ("kitty", &["--directory"]),
+            ("alacritty", &["--working-directory"]),
+            ("gnome-terminal", &["--working-directory"]),
+            ("konsole", &["--workdir"]),
+            ("xterm", &["-e"]),
+        ];
+        for (cmd, args) in candidates {
+            let mut c = Command::new(cmd);
+            if *cmd == "xdg-terminal-exec" {
+                c.current_dir(dir);
+            } else if *cmd == "xterm" {
+                c.current_dir(dir).arg("-e").arg("sh");
+            } else {
+                c.args(*args).arg(dir);
+            }
+            if c.spawn().is_ok() {
+                return;
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("cmd").args(["/C", "start", "cmd"]).current_dir(dir).spawn();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = dir;
+    }
+}
+
 pub fn trash_name() -> &'static str {
     "Trash"
 }

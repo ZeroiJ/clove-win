@@ -90,6 +90,39 @@ enum Location {
     Folder(PathBuf),
 }
 
+#[derive(Clone, Debug)]
+enum UndoAction {
+    Trash { moves: Vec<clove_shell::Move> },
+}
+
+#[derive(Clone, Debug)]
+struct FileOpProgress {
+    label: String,
+    done: usize,
+    total: usize,
+    bytes_done: u64,
+    bytes_total: u64,
+    failures: usize,
+    cancelled: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConflictChoice {
+    Replace,
+    Skip,
+    Rename,
+    ReplaceAll,
+    SkipAll,
+}
+
+#[derive(Clone, Debug)]
+struct PendingConflict {
+    src: PathBuf,
+    dest: PathBuf,
+    is_dir: bool,
+    apply_all: Option<ConflictChoice>,
+}
+
 struct State {
     location: Location,
     history_back: Vec<Location>,
@@ -125,8 +158,10 @@ struct State {
     active_tab: usize,
     status: String,
     loading: bool,
-    /// Receipt from the last trash, so Ctrl+Z can put it back.
-    undo: Option<Vec<clove_shell::Move>>,
+    /// Multi-level undo stack for file ops.
+    undo_stack: Vec<UndoAction>,
+    /// Active file operation progress (copy/move/delete/extract).
+    op_progress: Option<FileOpProgress>,
     bar: Pixels,
     bar_renderer: BarRenderer,
     bar_time: f32,
@@ -540,7 +575,7 @@ fn delete_selected(s: &mut State) {
                 return;
             }
             s.status = format!("moved {name} to the Trash . Ctrl+Z to undo");
-            s.undo = Some(moves);
+            s.undo_stack.push(UndoAction::Trash { moves });
             s.wake_bar();
         });
     });
@@ -548,21 +583,26 @@ fn delete_selected(s: &mut State) {
 
 
 fn undo_delete(s: &mut State) {
-    let Some(moves) = s.undo.take() else {
+    let Some(action) = s.undo_stack.pop() else {
+        s.status = "nothing to undo".into();
         return;
     };
     let handle = s.handle.clone();
     s.status = "restoring…".into();
 
     std::thread::spawn(move || {
-        let outcome = clove_shell::put_back(&moves);
-        handle.update(move |s, _| {
-            s.status = format!(
-                "restored {} · {} could not be restored",
-                outcome.restored, outcome.missing
-            );
-            s.wake_bar();
-        });
+        match action {
+            UndoAction::Trash { moves } => {
+                let outcome = clove_shell::put_back(&moves);
+                handle.update(move |s, _| {
+                    s.status = format!(
+                        "restored {} · {} could not be restored",
+                        outcome.restored, outcome.missing
+                    );
+                    s.wake_bar();
+                });
+            }
+        }
     });
 }
 
@@ -721,10 +761,18 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             let mut failures = 0usize;
             for src in &paths {
                 let Some(name) = src.file_name() else { failures += 1; continue; };
-                let dest = target.join(name);
+                let mut dest = target.join(name);
                 if dest.exists() {
-                    skipped += 1;
-                    continue;
+                    let stem = dest.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+                    let ext = dest.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+                    let mut n = 1u32;
+                    loop {
+                        let cand = target.join(format!("{stem} ({n}){ext}"));
+                        if !cand.exists() { dest = cand; break; }
+                        n += 1;
+                        if n > 10_000 { skipped += 1; break; }
+                    }
+                    if n > 10_000 { continue; }
                 }
                 let res = if src.is_dir() {
                     if cut {
@@ -1529,7 +1577,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                         .grow(1.0),
                 )
                 .child(
-                    text(if !s.status.is_empty() {
+                    text(if let Some(op) = &s.op_progress {
+                        format!("{} {}/{} · {} failed", op.label, op.done, op.total, op.failures)
+                    } else if !s.status.is_empty() {
                         s.status.clone()
                     } else if count == total {
                         format!("{total} items")
@@ -1790,7 +1840,6 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         // Context menu (right-click).
         .child(if s.context_menu.is_some() {
             let idx = s.context_menu.unwrap();
-            let entry_name = s.snapshot.entries.get(idx).map(|e| e.name.clone()).unwrap_or_default();
             col()
                 .key("ctx-overlay")
                 .w_full()
@@ -1799,7 +1848,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .child(
                     col()
                         .key("ctx-card")
-                        .w(200.0)
+                        .w(220.0)
                         .padding(8.0)
                         .gap(4.0)
                         .radius(tokens::RADIUS_CONTROL)
@@ -1818,17 +1867,87 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                             }
                             s.context_menu = None;
                         }))
+                        .child(ctx_item("Open With...", move |s: &mut State| {
+                            if let Some(entry) = s.snapshot.entries.get(idx) {
+                                if let Some(path) = entry_path(&s.location, entry) {
+                                    platform::open_path(&path);
+                                    s.status = "Open With: using default app (chooser TODO)".into();
+                                }
+                            }
+                            s.context_menu = None;
+                        }))
                         .child(ctx_item("Copy", move |s: &mut State| {
+                            if let Some(entry) = s.snapshot.entries.get(idx) {
+                                if let Some(path) = entry_path(&s.location, entry) {
+                                    s.clipboard = vec![path.clone()];
+                                    s.clipboard_cut = false;
+                                    let p2 = path.clone();
+                                    std::thread::spawn(move || { if let Ok(mut cb) = arboard::Clipboard::new() { let _ = cb.set().file_list(&[p2]); } });
+                                    s.status = "copied 1 item".into();
+                                }
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Copy Path", move |s: &mut State| {
+                            if let Some(entry) = s.snapshot.entries.get(idx) {
+                                if let Some(path) = entry_path(&s.location, entry) {
+                                    let text = path.to_string_lossy().to_string();
+                                    std::thread::spawn(move || { if let Ok(mut cb) = arboard::Clipboard::new() { let _ = cb.set_text(text); } });
+                                    s.status = "path copied".into();
+                                }
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("New File", move |s: &mut State| {
+                            if let Location::Folder(root) = s.location.clone() {
+                                let mut name = "New file".to_string();
+                                let mut n = 1u32;
+                                while root.join(&name).exists() { n += 1; name = format!("New file {n}"); }
+                                let dest = root.join(&name);
+                                match std::fs::OpenOptions::new().write(true).create_new(true).open(&dest) {
+                                    Ok(_) => { s.status = format!("created {name}"); reload(s); }
+                                    Err(_) => { s.status = "could not create file".into(); }
+                                }
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("New Folder", move |s: &mut State| {
+                            if let Location::Folder(root) = s.location.clone() {
+                                let mut name = "New folder".to_string();
+                                let mut n = 1u32;
+                                while root.join(&name).exists() { n += 1; name = format!("New folder {n}"); }
+                                let dest = root.join(&name);
+                                match std::fs::create_dir(&dest) {
+                                    Ok(_) => { s.status = format!("created {name}"); reload(s); }
+                                    Err(_) => { s.status = "could not create folder".into(); }
+                                }
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Terminal Here", move |s: &mut State| {
+                            let dir = match &s.location {
+                                Location::Folder(d) => d.clone(),
+                                Location::ThisPc => platform::home_dir(),
+                            };
+                            platform::open_terminal_here(&dir);
+                            s.status = "opening terminal".into();
                             s.context_menu = None;
                         }))
                         .child(ctx_item("Delete", move |s: &mut State| {
                             if let Some(e) = s.snapshot.entries.get(idx) {
                                 if let Some(p) = entry_path(&s.location, e) {
-                                    let root = match &s.location { Location::Folder(d) => d.clone(), _ => return };
+                                    let root = match &s.location { Location::Folder(d) => d.clone(), _ => { s.context_menu = None; return; } };
+                                    let name = e.name.clone();
                                     let handle = s.handle.clone();
                                     std::thread::spawn(move || {
-                                        let _ = clove_shell::trash(&p, &root, false);
-                                        handle.update(move |s, _| { reload(s); });
+                                        let outcome = clove_shell::trash(&p, &root, false);
+                                        handle.update(move |s, _| {
+                                            if !outcome.moves.is_empty() {
+                                                s.undo_stack.push(UndoAction::Trash { moves: outcome.moves });
+                                                s.status = format!("moved {name} to Trash · Ctrl+Z to undo");
+                                            }
+                                            reload(s);
+                                        });
                                     });
                                 }
                             }
@@ -2065,7 +2184,8 @@ fn build_state(handle: AppHandle<State>) -> State {
         show_hidden,
         status: String::new(),
         loading: false,
-        undo: None,
+        undo_stack: Vec::new(),
+        op_progress: None,
         bar,
         bar_renderer,
         bar_time: 0.0,
