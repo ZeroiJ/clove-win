@@ -804,6 +804,30 @@ fn apply_batch_rename(s: &mut State) {
         });
     });
 }
+fn unique_link_path(parent: &Path, target: &Path, kind: &str) -> PathBuf {
+    let stem = target.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "link".into());
+    let ext = target.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let mut dest = parent.join(format!("{} ({}{}){}", stem, kind, "", ext));
+    let mut n = 1u32;
+    while dest.exists() && n < 1000 {
+        dest = parent.join(format!("{} ({} {})({}){}", stem, kind, n, "", ext));
+        n += 1;
+    }
+    dest
+}
+
+fn create_symlink(target: &Path, dest: &Path) -> bool {
+    #[cfg(unix)]
+    { return std::os::unix::fs::symlink(target, dest).is_ok(); }
+    #[cfg(windows)]
+    {
+        if target.is_dir() { return std::os::windows::fs::symlink_dir(target, dest).is_ok(); }
+        return std::os::windows::fs::symlink_file(target, dest).is_ok();
+    }
+    #[cfg(not(any(unix, windows)))]
+    { let _ = (target, dest); false }
+}
+
 fn is_archive(path: &Path) -> bool {
     let lower = path.to_string_lossy().to_lowercase();
     lower.ends_with(".zip") || lower.ends_with(".tar.gz") || lower.ends_with(".tgz")
@@ -2687,6 +2711,34 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                                     } else {
                                         s.status = "not an archive".into();
                                     }
+                                }
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Create Symlink", move |s: &mut State| {
+                            if let Some(entry) = s.snapshot.entries.get(idx) {
+                                if let Some(path) = entry_path(&s.location, entry) {
+                                    if let Some(parent) = path.parent() {
+                                        let dest = unique_link_path(parent, &path, "symlink");
+                                        let res = create_symlink(&path, &dest);
+                                        s.status = if res { "symlink created".into() } else { "symlink failed".into() };
+                                        reload(s);
+                                    }
+                                }
+                            }
+                            s.context_menu = None;
+                        }))
+                        .child(ctx_item("Create Hardlink", move |s: &mut State| {
+                            if let Some(entry) = s.snapshot.entries.get(idx) {
+                                if let Some(path) = entry_path(&s.location, entry) {
+                                    if path.is_file() {
+                                        if let Some(parent) = path.parent() {
+                                            let dest = unique_link_path(parent, &path, "hardlink");
+                                            let res = std::fs::hard_link(&path, &dest).is_ok();
+                                            s.status = if res { "hardlink created".into() } else { "hardlink failed".into() };
+                                            reload(s);
+                                        }
+                                    } else { s.status = "hardlink: files only".into(); }
                                 }
                             }
                             s.context_menu = None;
