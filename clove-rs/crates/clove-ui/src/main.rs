@@ -1725,6 +1725,54 @@ fn ctx_item(label: &'static str, on: impl Fn(&mut State) + 'static) -> El {
         .on_press(move |s: &mut State| on2(s))
 }
 
+fn sidebar_el(s: &State) -> El {
+    let mut col = col()
+        .key("sidebar")
+        .w(180.0)
+        .h_full()
+        .padding(8.0)
+        .gap(4.0)
+        .fill(surface());
+    col = col.child(text("Bookmarks").font(type_::LABEL).color(ink_secondary()));
+    for (name, path) in platform::quick_access() {
+        let target = path.clone();
+        col = col.child(
+            el()
+                .key(format!("sb-bm-{}", name))
+                .w_full()
+                .h(22.0)
+                .px(6.0)
+                .center_y()
+                .radius(tokens::RADIUS_CONTROL)
+                .child(text(name).font(type_::BODY).color(ink()))
+                .on_press(move |s: &mut State| {
+                    navigate(s, Location::Folder(target.clone()));
+                    sync_address(s);
+                }),
+        );
+    }
+    col = col.child(text("Mounts").font(type_::LABEL).color(ink_secondary()));
+    for (name, path) in platform::mount_entries() {
+        let target = path.clone();
+        let label = if name == "/" { "/".to_string() } else { name.clone() };
+        col = col.child(
+            el()
+                .key(format!("sb-mnt-{}", name))
+                .w_full()
+                .h(22.0)
+                .px(6.0)
+                .center_y()
+                .radius(tokens::RADIUS_CONTROL)
+                .child(text(label).font(type_::BODY).color(ink()))
+                .on_press(move |s: &mut State| {
+                    navigate(s, Location::Folder(target.clone()));
+                    sync_address(s);
+                }),
+        );
+    }
+    col
+}
+
 fn view(s: &State, cx: &mut Cx<State>) -> El {
     let scale = cx.env().scale;
     if (scale - s.ui_scale).abs() > 0.01 {
@@ -1739,13 +1787,19 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     let count = s.filtered.len();
     let total = s.snapshot.len();
 
-    col()
+    row()
         .key("root")
         .w_full()
         .h_full()
         .fill(bg())
-        .padding(12.0)
         .gap(8.0)
+        .child(sidebar_el(s))
+        .child(
+            col()
+                .key("main")
+                .grow(1.0)
+                .padding(12.0)
+                .gap(8.0)
         // Tab bar.
         .child(
             row()
@@ -2506,6 +2560,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         } else {
             col().key("ctx-off").w(0.0).h(0.0)
         })
+        )
 }
 
 // ---------------------------------------------------------------- main
