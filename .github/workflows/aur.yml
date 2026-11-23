@@ -1,0 +1,52 @@
+name: Publish AUR
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  aur:
+    name: Publish to AUR
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed base-devel git openssh
+
+      - name: Fetch pinned Rune checkout
+        run: |
+          git clone --depth 1 https://github.com/anomalyco/rune.git prototypes/_rune-upstream
+          cd prototypes/_rune-upstream
+          git fetch --depth 1 origin db301c06ab0d68b70c4822a542fffc6615bbd419
+          git checkout db301c06ab0d68b70c4822a542fffc6615bbd419
+
+      - name: Generate .SRCINFO
+        working-directory: packaging/aur
+        run: makepkg --printsrcinfo > .SRCINFO
+
+      - name: Configure SSH
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Publish
+        env:
+          GIT_SSH_COMMAND: "ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+        run: |
+          git clone ssh://aur@aur.archlinux.org/clove.git aur-clove
+          cp packaging/aur/PKGBUILD packaging/aur/.SRCINFO aur-clove/
+          cd aur-clove
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${{ github.ref_name }}" || echo "nothing to commit"
+          git push
