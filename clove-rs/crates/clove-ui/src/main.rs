@@ -128,6 +128,8 @@ struct PendingConflict {
 
 struct State {
     location: Location,
+    git_branch: Option<String>,
+    git_dirty: bool,
     history_back: Vec<Location>,
     history_forward: Vec<Location>,
     snapshot: Arc<Snapshot>,
@@ -368,6 +370,7 @@ fn navigate(s: &mut State, location: Location) {
 
     s.location = location.clone();
     sync_address(s);
+    refresh_git(s);
     if s.tabs.is_empty() { s.tabs.push(s.location.clone()); }
     if s.active_tab < s.tabs.len() { s.tabs[s.active_tab] = s.location.clone(); }
     save_tabs(s);
@@ -816,6 +819,32 @@ fn dir_size(path: &Path) -> u64 {
         }
     }
     total
+}
+
+fn refresh_git(s: &mut State) {
+    let dir = match &s.location {
+        Location::Folder(d) => d.clone(),
+        Location::ThisPc => return,
+    };
+    // find repo root
+    let out = std::process::Command::new("git")
+        .args(["-C", &dir.to_string_lossy(), "rev-parse", "--show-toplevel"])
+        .output();
+    let root = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => { s.git_branch = None; s.git_dirty = false; return; }
+    };
+    if root.is_empty() { s.git_branch = None; s.git_dirty = false; return; }
+    let branch_out = std::process::Command::new("git")
+        .args(["-C", &root, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output();
+    let branch = branch_out.ok().and_then(|o| if o.status.success() { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { None });
+    let dirty_out = std::process::Command::new("git")
+        .args(["-C", &root, "status", "--porcelain"])
+        .output();
+    let dirty = dirty_out.map(|o| !o.stdout.is_empty()).unwrap_or(false);
+    s.git_branch = branch;
+    s.git_dirty = dirty;
 }
 
 fn load_thumbnails(s: &mut State) {
@@ -1946,6 +1975,14 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                         .color(ink())
                         .grow(1.0),
                 )
+                .child(if let Some(b) = &s.git_branch {
+                    text(format!("⌥ {}{}", b, if s.git_dirty { " ●" } else { "" }))
+                        .key("git")
+                        .font(type_::LABEL)
+                        .color(ink_secondary())
+                } else {
+                    text("").key("git-off").font(type_::LABEL).color(ink_secondary())
+                })
                 .child(
                     text(if let Some(op) = &s.op_progress {
                         format!("{} {}/{} · {} failed", op.label, op.done, op.total, op.failures)
@@ -2759,6 +2796,8 @@ fn start_dir() -> PathBuf {
 
 fn build_state(handle: AppHandle<State>) -> State {
     let location = Location::ThisPc;
+    let git_branch = None;
+    let git_dirty = false;
 
     let (sort_by, sort_desc, folders_first, view_mode, show_hidden) =
         load_settings().unwrap_or((0, false, true, 0, false));
@@ -2816,6 +2855,8 @@ fn build_state(handle: AppHandle<State>) -> State {
 
     State {
         location,
+        git_branch,
+        git_dirty,
         history_back: Vec::new(),
         history_forward: Vec::new(),
         snapshot: Arc::new(Snapshot::new(PathBuf::new(), pc_entries)),
