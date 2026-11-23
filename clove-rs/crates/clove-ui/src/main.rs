@@ -804,6 +804,55 @@ fn apply_batch_rename(s: &mut State) {
         });
     });
 }
+fn is_archive(path: &Path) -> bool {
+    let lower = path.to_string_lossy().to_lowercase();
+    lower.ends_with(".zip") || lower.ends_with(".tar.gz") || lower.ends_with(".tgz")
+        || lower.ends_with(".tar") || lower.ends_with(".tar.bz2") || lower.ends_with(".tar.xz")
+        || lower.ends_with(".7z") || lower.ends_with(".rar")
+}
+
+fn extract_archive(src: &Path, target: &Path) -> bool {
+    let _ = std::fs::create_dir_all(target);
+    let lower = src.to_string_lossy().to_lowercase();
+    let res = if lower.ends_with(".zip") {
+        std::process::Command::new("unzip").args(["-o", &src.to_string_lossy(), "-d", &target.to_string_lossy()]).status()
+    } else if lower.ends_with(".7z") {
+        std::process::Command::new("7z").args(["x", "-y", &format!("-o{}", target.to_string_lossy()), &src.to_string_lossy()]).status()
+    } else if lower.ends_with(".rar") {
+        std::process::Command::new("unrar").args(["x", "-y", &src.to_string_lossy(), &target.to_string_lossy()]).status()
+    } else {
+        std::process::Command::new("tar").args(["xf", &src.to_string_lossy(), "-C", &target.to_string_lossy()]).status()
+    };
+    res.map(|r| r.success()).unwrap_or(false)
+}
+
+fn props_permissions(path: &Path) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(md) = path.metadata() {
+            let m = md.permissions().mode();
+            return format!("{:03o}", m & 0o777);
+        }
+    }
+    #[cfg(not(unix))]
+    { let _ = path; }
+    "unknown".to_string()
+}
+
+fn props_owner(path: &Path) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(md) = path.metadata() {
+            return format!("uid {}", md.uid());
+        }
+    }
+    #[cfg(not(unix))]
+    { let _ = path; }
+    "unknown".to_string()
+}
+
 fn dir_size(path: &Path) -> u64 {
     let mut total = 0u64;
     if let Ok(rd) = std::fs::read_dir(path) {
@@ -1269,8 +1318,29 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                         return true;
                     }
                 } else if let Some(path) = entry_path(&s.location, &s.snapshot.entries[index]) {
-                    platform::open_path(&path);
-                    s.status = format!("opening {}", s.snapshot.entries[index].name);
+                    if is_archive(&path) {
+                        // extract-on-navigate: extract to sibling folder, then enter it
+                        let dest = path.with_extension("");
+                        let dest = if dest == path { path.with_file_name(format!("{}.extracted", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())) } else { dest };
+                        let handle = s.handle.clone();
+                        let src = path.clone();
+                        let target = dest.clone();
+                        s.status = "extracting...".into();
+                        std::thread::spawn(move || {
+                            let ok = extract_archive(&src, &target);
+                            handle.update(move |s, _| {
+                                if ok {
+                                    navigate(s, Location::Folder(target));
+                                    sync_address(s);
+                                } else {
+                                    s.status = "extract failed".into();
+                                }
+                            });
+                        });
+                    } else {
+                        platform::open_path(&path);
+                        s.status = format!("opening {}", s.snapshot.entries[index].name);
+                    }
                     return true;
                 }
             }
@@ -2230,6 +2300,8 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                         .child(text(format!("Properties: {}", name)).font(type_::TITLE).color(ink()))
                         .child(text(format!("Location: {}", path.display())).font(type_::LABEL).color(ink_secondary()))
                         .child(text(format!("Type: {}", if path.is_dir() { "Folder" } else { "File" })).font(type_::LABEL).color(ink_secondary()))
+                        .child(text(format!("Permissions: {}", props_permissions(&path))).font(type_::LABEL).color(ink_secondary()))
+                        .child(text(format!("Owner: {}", props_owner(&path))).font(type_::LABEL).color(ink_secondary()))
                         .child(text(if loading {
                             "Size: calculating...".to_string()
                         } else if let Some(sz) = size {
