@@ -198,7 +198,39 @@ pub fn put_back(moves: &[Move]) -> RestoreOutcome {
         if let Some(parent) = mv.original.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if std::fs::rename(trashed, &mv.original).is_ok() {
+        let restored_ok = if std::fs::rename(trashed, &mv.original).is_ok() {
+            true
+        } else {
+            // Cross-filesystem restore: copy, then remove the trashed payload.
+            let copy_ok = if trashed.is_dir() && !trashed.is_symlink() {
+                copy_dir_recursive(trashed, &mv.original).is_ok()
+            } else if trashed.is_symlink() {
+                #[cfg(unix)]
+                {
+                    std::fs::read_link(trashed)
+                        .ok()
+                        .and_then(|target| std::os::unix::fs::symlink(&target, &mv.original).ok())
+                        .is_some()
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            } else {
+                std::fs::copy(trashed, &mv.original).is_ok()
+            };
+            if copy_ok {
+                let _ = if trashed.is_dir() && !trashed.is_symlink() {
+                    std::fs::remove_dir_all(trashed)
+                } else {
+                    std::fs::remove_file(trashed)
+                };
+                true
+            } else {
+                false
+            }
+        };
+        if restored_ok {
             outcome.restored += 1;
         } else {
             outcome.missing += 1;
@@ -211,14 +243,35 @@ pub fn put_back(moves: &[Move]) -> RestoreOutcome {
 
 /// Recycles one path and recovers where it landed.
 fn recycle_one(path: &Path) -> Option<Move> {
-    let since = std::time::SystemTime::now();
     let absolute = std::path::absolute(path).ok()?;
-    shell_recycle(&absolute)?;
-    let trashed = find_trashed(&absolute, since);
-    Some(Move {
-        original: absolute,
-        trashed,
-    })
+
+    #[cfg(windows)]
+    {
+        let since = std::time::SystemTime::now();
+        shell_recycle(&absolute)?;
+        let trashed = find_trashed(&absolute, since);
+        Some(Move {
+            original: absolute,
+            trashed,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        match shell_recycle(&absolute) {
+            Some(trashed) => Some(Move {
+                original: absolute,
+                trashed: Some(trashed),
+            }),
+            None => None,
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = absolute;
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -250,9 +303,118 @@ fn shell_recycle(path: &Path) -> Option<()> {
     Some(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn shell_recycle(path: &Path) -> Option<PathBuf> {
+    use std::fs;
+
+    let root = trash_root()?;
+    let files_dir = root.join("files");
+    let info_dir = root.join("info");
+    fs::create_dir_all(&files_dir).ok()?;
+    fs::create_dir_all(&info_dir).ok()?;
+
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let unique = unique_trash_name(&files_dir, &info_dir, &name);
+    let payload = files_dir.join(&unique);
+    let info_path = info_dir.join(format!("{}.trashinfo", unique));
+
+    // Prefer an atomic rename; fall back to copy+delete across filesystems.
+    if fs::rename(path, &payload).is_err() {
+        if path.is_dir() && !path.is_symlink() {
+            copy_dir_recursive(path, &payload).ok()?;
+            fs::remove_dir_all(path).ok()?;
+        } else {
+            fs::copy(path, &payload).ok()?;
+            fs::remove_file(path).ok()?;
+        }
+    }
+
+    // If the move failed, the payload will not exist.
+    if !payload.exists() {
+        let _ = fs::remove_file(&payload);
+        let _ = fs::remove_file(&info_path);
+        return None;
+    }
+
+    let content = format!(
+        "[Trash Info]\nPath={}\nDeletionDate={}\n",
+        path.display(),
+        local_now()
+    );
+    if fs::write(&info_path, content).is_err() {
+        // Best effort: leave the file trashed rather than losing it.
+    }
+
+    Some(payload)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn shell_recycle(_path: &Path) -> Option<()> {
     None
+}
+
+fn unique_trash_name(files_dir: &Path, info_dir: &Path, name: &str) -> String {
+    let payload = files_dir.join(name);
+    let info = info_dir.join(format!("{}.trashinfo", name));
+    if !payload.exists() && !info.exists() {
+        return name.to_string();
+    }
+    for i in 1.. {
+        let candidate = format!("{}.{}", name, i);
+        let payload = files_dir.join(&candidate);
+        let info = info_dir.join(format!("{}.trashinfo", candidate));
+        if !payload.exists() && !info.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::fs;
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let ft = entry.file_type()?;
+        if ft.is_dir() && !ft.is_symlink() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if ft.is_symlink() {
+            let target = std::fs::read_link(&src_path)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn trash_root() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".local").join("share"))
+        })?;
+    Some(base.join("Trash"))
+}
+
+fn local_now() -> String {
+    use libc::time_t;
+    unsafe {
+        let mut t: time_t = 0;
+        libc::time(&mut t);
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        let mut buf = [0u8; 64];
+        let fmt = b"%Y-%m-%dT%H:%M:%S\0";
+        libc::strftime(buf.as_mut_ptr().cast(), buf.len(), fmt.as_ptr().cast(), &tm);
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..len]).to_string()
+    }
 }
 
 /// The user's Recycle Bin, one directory per SID, on the volume that holds `path`.

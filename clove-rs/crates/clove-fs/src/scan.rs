@@ -98,6 +98,7 @@ impl StorageKind {
     }
 
     /// Where this kind lives on Windows. Missing folders are simply skipped.
+    #[cfg(windows)]
     pub fn roots(self) -> Vec<PathBuf> {
         let Some(home) = home_dir() else {
             return Vec::new();
@@ -163,6 +164,70 @@ impl StorageKind {
     }
 }
 
+impl StorageKind {
+    /// Where this kind lives on Arch/Linux. Missing folders are simply skipped.
+    #[cfg(target_os = "linux")]
+    pub fn roots(self) -> Vec<PathBuf> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    let xdg_data = env_path("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local").join("share"));
+    let xdg_cache = env_path("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache"));
+    let xdg_pictures = env_path("XDG_PICTURES_DIR").unwrap_or_else(|| home.join("Pictures"));
+    let xdg_videos = env_path("XDG_VIDEOS_DIR").unwrap_or_else(|| home.join("Videos"));
+    let xdg_documents = env_path("XDG_DOCUMENTS_DIR").unwrap_or_else(|| home.join("Documents"));
+    let xdg_music = env_path("XDG_MUSIC_DIR").unwrap_or_else(|| home.join("Music"));
+    let xdg_download = env_path("XDG_DOWNLOAD_DIR").unwrap_or_else(|| home.join("Downloads"));
+    let xdg_desktop = env_path("XDG_DESKTOP_DIR").unwrap_or_else(|| home.join("Desktop"));
+
+    let mut roots = Vec::new();
+    match self {
+        StorageKind::Apps => {
+            roots.push(PathBuf::from("/opt"));
+            roots.push(PathBuf::from("/var/lib/flatpak"));
+            roots.push(PathBuf::from("/var/lib/snapd"));
+            roots.push(home.join(".local").join("share").join("Steam"));
+            roots.push(home.join("Applications"));
+        }
+        StorageKind::Code => {
+            for name in [
+                "Projects", "projects", "dev", "repos", "src", "code", "GitHub", "workspace",
+            ] {
+                roots.push(home.join(name));
+            }
+            for name in [
+                ".cargo", ".rustup", ".gradle", ".m2", ".npm", "go", ".local", ".bun", ".vscode",
+                ".claude", ".cursor", ".codex", ".ollama", ".config", ".cache",
+            ] {
+                roots.push(home.join(name));
+            }
+        }
+        StorageKind::Photos => roots.push(xdg_pictures),
+        StorageKind::Movies => roots.push(xdg_videos),
+        StorageKind::Documents => {
+            roots.push(xdg_documents);
+            roots.push(xdg_desktop);
+            roots.push(xdg_download);
+        }
+        StorageKind::Music => roots.push(xdg_music),
+        StorageKind::System => {}
+        StorageKind::Caches => {
+            roots.push(xdg_cache);
+            roots.push(PathBuf::from("/var/cache/pacman/pkg"));
+        }
+        StorageKind::Trash => {
+            roots.push(xdg_data.join("Trash").join("files"));
+        }
+    }
+    roots
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn roots(self) -> Vec<PathBuf> {
+    Vec::new()
+}
+}
+
 fn home_dir() -> Option<PathBuf> {
     env_path("USERPROFILE").or_else(|| env_path("HOME"))
 }
@@ -219,7 +284,20 @@ pub fn volume_for(path: impl AsRef<Path>) -> Option<Volume> {
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn volume_for(path: impl AsRef<Path>) -> Option<Volume> {
+    let mut probe = path.as_ref().to_path_buf();
+    if !probe.is_dir() {
+        probe = probe.parent()?.to_path_buf();
+    }
+    let stat = rustix::fs::statvfs(&probe).ok()?;
+    Some(Volume {
+        capacity: stat.f_blocks.saturating_mul(stat.f_frsize),
+        free: stat.f_bavail.saturating_mul(stat.f_frsize),
+    })
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn volume_for(_path: impl AsRef<Path>) -> Option<Volume> {
     None
 }

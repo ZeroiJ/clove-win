@@ -24,6 +24,8 @@ use rune::{
     KeyEvent, Pixels, ScrollSpec, TextEdit, Tx,
 };
 
+mod platform;
+
 use clove_fs::{list_dir, DirWatcher, Entry, Snapshot};
 use clove_fs::scan::{ScanEvent, StorageKind, StorageScan, KIND_COUNT};
 use clove_render::tokens::{self, Rgb};
@@ -449,16 +451,7 @@ fn reload(s: &mut State) {
 
 fn this_pc_entries() -> Vec<Entry> {
     let mut entries = Vec::new();
-    let home = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_default();
-    let quick = [
-        ("Desktop", home.join("Desktop")),
-        ("Documents", home.join("Documents")),
-        ("Downloads", home.join("Downloads")),
-        ("Pictures", home.join("Pictures")),
-        ("Music", home.join("Music")),
-        ("Videos", home.join("Videos")),
-    ];
-    for (name, path) in quick {
+    for (name, path) in platform::quick_access() {
         if path.exists() {
             entries.push(Entry::new(name, true, 0));
         }
@@ -473,6 +466,14 @@ fn this_pc_entries() -> Vec<Entry> {
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        for (label, path) in platform::mount_entries() {
+            if path.exists() {
+                entries.push(Entry::new(label, true, 0));
+            }
+        }
+    }
     entries
 }
 
@@ -482,7 +483,7 @@ fn this_pc_resolve(entry: &Entry) -> Option<PathBuf> {
         let letter = name.chars().next().unwrap();
         return Some(PathBuf::from(format!("{letter}:\\\\")));
     }
-    let home = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_default();
+    let home = platform::home_dir();
     match name {
         "Desktop" => Some(home.join("Desktop")),
         "Documents" => Some(home.join("Documents")),
@@ -490,7 +491,14 @@ fn this_pc_resolve(entry: &Entry) -> Option<PathBuf> {
         "Pictures" => Some(home.join("Pictures")),
         "Music" => Some(home.join("Music")),
         "Videos" => Some(home.join("Videos")),
-        _ => None,
+        _ => {
+            // Mount points on Linux are stored under their own path.
+            if name.starts_with('/') {
+                Some(PathBuf::from(name))
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -511,7 +519,7 @@ fn delete_selected(s: &mut State) {
     let Some(path) = entry_path(&s.location, &entry) else { return };
     let handle = s.handle.clone();
 
-    s.status = format!("moving {} to the Recycle Bin...", entry.name);
+    s.status = format!("moving {} to the Trash...", entry.name);
     s.wake_bar();
 
     std::thread::spawn(move || {
@@ -526,7 +534,7 @@ fn delete_selected(s: &mut State) {
                 }
                 return;
             }
-            s.status = format!("moved {name} to the Recycle Bin . Ctrl+Z to undo");
+            s.status = format!("moved {name} to the Trash . Ctrl+Z to undo");
             s.undo = Some(moves);
             s.wake_bar();
         });
@@ -922,6 +930,10 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                         sync_address(s);
                         return true;
                     }
+                } else if let Some(path) = entry_path(&s.location, &s.snapshot.entries[index]) {
+                    platform::open_path(&path);
+                    s.status = format!("opening {}", s.snapshot.entries[index].name);
+                    return true;
                 }
             }
             false
@@ -1092,18 +1104,59 @@ fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
     let mut finished = false;
     let mut new_done = false;
-    if let Some(scan) = &s.scan {
+    let events: Vec<ScanEvent> = if let Some(scan) = &s.scan {
+        let mut v = Vec::new();
         while let Some(event) = scan.try_recv() {
-            match event {
-                ScanEvent::Progress(progress) => {
-                    s.storage_bytes[progress.kind.index()] = progress.bytes;
+            v.push(event);
+        }
+        v
+    } else {
+        Vec::new()
+    };
+    for event in events {
+        match event {
+            ScanEvent::Progress(progress) => {
+                s.storage_bytes[progress.kind.index()] = progress.bytes;
+                s.storage_has_data = true;
+                let total: u64 = s.storage_bytes.iter().sum();
+                let capacity = if s.storage_capacity > 0 {
+                    s.storage_capacity
+                } else {
+                    total.max(1)
+                };
+                let segments = s
+                    .storage_bytes
+                    .iter()
+                    .enumerate()
+                    .map(|(kind, &bytes)| Segment::kind(kind, bytes as f32 / capacity as f32))
+                    .collect();
+                if s.bar_renderer.set_segments(segments) {
+                    s.wake_bar();
+                    changed = true;
                 }
-                ScanEvent::Done(report) => {
-                    s.storage_bytes[report.kind.index()] = report.bytes;
-                    new_done = true;
-                }
-                ScanEvent::Finished => finished = true,
             }
+            ScanEvent::Done(report) => {
+                s.storage_bytes[report.kind.index()] = report.bytes;
+                s.storage_has_data = true;
+                let total: u64 = s.storage_bytes.iter().sum();
+                let capacity = if s.storage_capacity > 0 {
+                    s.storage_capacity
+                } else {
+                    total.max(1)
+                };
+                let segments = s
+                    .storage_bytes
+                    .iter()
+                    .enumerate()
+                    .map(|(kind, &bytes)| Segment::kind(kind, bytes as f32 / capacity as f32))
+                    .collect();
+                if s.bar_renderer.set_segments(segments) {
+                    s.wake_bar();
+                    changed = true;
+                }
+                new_done = true;
+            }
+            ScanEvent::Finished => finished = true,
         }
     }
     if new_done {
@@ -1737,10 +1790,17 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                         .radius(tokens::RADIUS_CONTROL)
                         .fill(surface())
                         .child(ctx_item("Open", move |s: &mut State| {
-                            if let Some(&i) = s.filtered.get(s.cursor) {
-                                // no-op placeholder
+                            if let Some(entry) = s.snapshot.entries.get(idx) {
+                                if let Some(path) = entry_path(&s.location, entry) {
+                                    if entry.is_dir {
+                                        navigate(s, Location::Folder(path));
+                                        sync_address(s);
+                                    } else {
+                                        platform::open_path(&path);
+                                        s.status = format!("opening {}", entry.name);
+                                    }
+                                }
                             }
-                            let _ = idx;
                             s.context_menu = None;
                         }))
                         .child(ctx_item("Copy", move |s: &mut State| {
@@ -1788,9 +1848,16 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 // ---------------------------------------------------------------- main
 
 fn settings_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .map(|p| p.join("Clove").join("settings.json"))
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|p| p.join("Clove").join("settings.json"))
+    }
+    #[cfg(not(windows))]
+    {
+        Some(platform::config_dir().join("clove").join("settings.json"))
+    }
 }
 
 fn load_settings() -> Option<(u8, bool, bool, u8, bool)> {
@@ -1832,9 +1899,16 @@ fn save_settings(s: &State) {
 }
 
 fn storage_cache_path() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|p| p.join("Clove").join("storage-scan.txt"))
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|p| p.join("Clove").join("storage-scan.txt"))
+    }
+    #[cfg(not(windows))]
+    {
+        Some(platform::cache_dir().join("clove").join("storage-scan.txt"))
+    }
 }
 
 fn load_storage_cache() -> Option<([u64; KIND_COUNT], u64, u64)> {

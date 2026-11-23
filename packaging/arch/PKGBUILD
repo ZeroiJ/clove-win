@@ -1,0 +1,59 @@
+# Maintainer: ZeroiJ
+# Local Arch package for Clove. Build from a checkout of the linux-port branch.
+#
+# Rune is fetched at a pinned commit and extracted into the path the workspace
+# expects (prototypes/_rune-upstream), because clove-rs/Cargo.toml uses path
+# dependencies for Rune and its patched vendor crates.
+
+pkgname=clove
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Fast dithered-storage file manager"
+arch=('x86_64')
+url="https://github.com/ZeroiJ/clove-win"
+license=('MIT')
+depends=(
+  'gcc-libs'
+  'fontconfig'
+  'libxkbcommon'
+  'wayland'
+  'vulkan-icd-loader'
+)
+makedepends=('cargo' 'git' 'rust')
+options=('!debug')
+
+_branch=linux-port
+_runerev=db301c06ab0d68b70c4822a542fffc6615bbd419
+
+source=(
+  "clove::git+https://github.com/ZeroiJ/clove-win.git#branch=${_branch}"
+  "rune-${_runerev}.tar.gz::https://github.com/anomalyco/rune/archive/${_runerev}.tar.gz"
+)
+sha256sums=('SKIP' 'SKIP')
+
+prepare() {
+  cd "${srcdir}/clove"
+  mkdir -p prototypes
+  tar -xf "${srcdir}/rune-${_runerev}.tar.gz" -C prototypes
+  mv "prototypes/rune-${_runerev}" "prototypes/_rune-upstream"
+}
+
+build() {
+  cd "${srcdir}/clove/clove-rs"
+  cargo build --release --locked -p clove-ui
+}
+
+package() {
+  cd "${srcdir}/clove"
+
+  install -Dm755 "clove-rs/target/release/clove" "${pkgdir}/usr/bin/clove"
+  install -Dm644 "packaging/arch/clove.desktop" \
+    "${pkgdir}/usr/share/applications/clove.desktop"
+  install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/clove/LICENSE"
+
+  local icon
+  for icon in 16 32 128 256 512; do
+    install -Dm644 "Clove/Assets.xcassets/AppIcon.appiconset/icon_${icon}x${icon}.png" \
+      "${pkgdir}/usr/share/icons/hicolor/${icon}x${icon}/apps/clove.png"
+  done
+}

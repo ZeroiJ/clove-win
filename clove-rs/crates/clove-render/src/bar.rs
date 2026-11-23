@@ -96,7 +96,8 @@ impl BarSpec {
 }
 
 /// Incremental CPU renderer for one bar size. Reuse it across frames; construct a new one
-/// when the width or the segment layout changes.
+/// when the size or scale changes, and call [`BarRenderer::set_segments`] when only the
+/// segment layout changes, so per-cell animation state survives.
 pub struct BarRenderer {
     spec: BarSpec,
     w_px: usize,
@@ -257,6 +258,75 @@ impl BarRenderer {
     /// Number of 4 pt cells the bar is made of (`cols × rows`).
     pub fn cell_count(&self) -> usize {
         self.kinds.len()
+    }
+
+    /// Updates the segment layout in place, preserving per-cell animation state.
+    ///
+    /// Use this when a scan changes per-kind sizes: the bar re-dithers the cells whose
+    /// owning kind changed, instead of rebuilding the renderer and losing heat/glints.
+    /// Returns true when the segments actually changed.
+    pub fn set_segments(&mut self, segments: Vec<Segment>) -> bool {
+        if self.spec.segments == segments {
+            return false;
+        }
+        self.spec.segments = segments;
+
+        let scale = self.spec.scale.max(0.5);
+        let width_pts = self.spec.width_pts;
+        let height_pts = self.spec.height_pts;
+        let cols = self.cols;
+        let rows = self.rows;
+
+        // Recompute segment edges (in points).
+        let mut edges = Vec::with_capacity(self.spec.segments.len() + 1);
+        let mut acc = 0.0f32;
+        edges.push(0.0);
+        for s in &self.spec.segments {
+            acc = (acc + s.fraction.max(0.0)).min(1.0);
+            edges.push(acc * width_pts);
+        }
+
+        // Recompute which segment owns each cell.
+        let ox = (width_pts - cols as f32 * PITCH) / 2.0;
+        let oy = (height_pts - rows as f32 * PITCH) / 2.0;
+        for j in 0..rows {
+            let cy = oy + (j as f32 + 0.5) * PITCH;
+            for i in 0..cols {
+                let c = j * cols + i;
+                let cx = ox + (i as f32 + 0.5) * PITCH;
+                let mut kind = -1;
+                for k in 0..self.spec.segments.len() {
+                    if cx >= edges[k] && cx < edges[k + 1] {
+                        kind = k as i32;
+                        break;
+                    }
+                }
+                self.kinds[c] = kind;
+            }
+        }
+
+        // Recompute the per-column fill tint.
+        for x in 0..self.w_px {
+            let px = x as f32 / scale;
+            let mut slot = [0u8; 4];
+            for k in 0..self.spec.segments.len() {
+                if px >= edges[k] && px < edges[k + 1] {
+                    let rgb = self.spec.segments[k].rgb;
+                    slot = [
+                        (rgb[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+                        (rgb[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+                        (rgb[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+                        31,
+                    ];
+                    break;
+                }
+            }
+            self.fill[x] = slot;
+        }
+
+        // Force the next render to recompute instead of using the settle-stop fast path.
+        self.last_t = None;
+        true
     }
 
     /// The latest frame, straight-alpha RGBA, row-major.

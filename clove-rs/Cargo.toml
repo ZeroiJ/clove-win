@@ -43,6 +43,7 @@ codegen-units = 1
 [patch.crates-io]
 wgpu-hal = { path = "../prototypes/_rune-upstream/vendor/wgpu-hal" }
 winit = { path = "../prototypes/_rune-upstream/vendor/winit" }
+sctk-adwaita = { path = "../prototypes/_rune-upstream/vendor/sctk-adwaita" }
 parley_engine = { path = "../prototypes/_rune-upstream/vendor/parley_engine" }
 accesskit_windows = { path = "../prototypes/_rune-upstream/vendor/accesskit_windows" }
 accesskit_macos = { path = "../prototypes/_rune-upstream/vendor/accesskit_macos" }

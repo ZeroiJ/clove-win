@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
+#[cfg(windows)]
 use crate::extended_path;
 
 /// What the watcher saw.
@@ -48,7 +49,7 @@ impl DirWatcher {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, events) = mpsc::channel();
 
-        #[cfg(windows)]
+        #[cfg(any(windows, unix))]
         let thread = {
             let handle = imp::open(&path)?;
             let stop = stop.clone();
@@ -69,10 +70,11 @@ impl DirWatcher {
             }
         };
 
-        #[cfg(not(windows))]
+        #[cfg(all(not(windows), not(unix)))]
         let thread = {
             // No portable watcher without a dependency; report once and stop.
             let _ = tx.send(WatchSignal::Failed);
+            let stop = stop.clone();
             std::thread::Builder::new()
                 .name("clove-fs-watch".into())
                 .spawn(move || {
@@ -266,6 +268,67 @@ mod imp {
                     unsafe { GetOverlappedResult(handles.dir, &overlapped, &mut bytes, 1) };
                 }
                 _ => {
+                    let _ = tx.send(WatchSignal::Failed);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+mod imp {
+    use super::*;
+    use rustix::fd::OwnedFd;
+    use rustix::fs::inotify;
+
+    pub(super) type Handles = OwnedFd;
+
+    pub(super) fn open(dir: &Path) -> io::Result<Handles> {
+        let fd = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)?;
+        inotify::add_watch(&fd, dir, inotify::WatchFlags::ALL_EVENTS)?;
+        Ok(fd)
+    }
+
+    pub(super) fn run(
+        handles: Handles,
+        stop: Arc<AtomicBool>,
+        tx: mpsc::Sender<WatchSignal>,
+        armed: mpsc::SyncSender<io::Result<()>>,
+    ) {
+        if armed.send(Ok(())).is_err() {
+            return;
+        }
+        let mut buf = vec![std::mem::MaybeUninit::uninit(); 64 * 1024];
+        let mut reader = inotify::Reader::new(handles, &mut buf);
+        while !stop.load(Ordering::Relaxed) {
+            match reader.next() {
+                Ok(event) => {
+                    let signal = if event.events().contains(inotify::ReadFlags::QUEUE_OVERFLOW) {
+                        WatchSignal::Overflow
+                    } else {
+                        WatchSignal::Changed
+                    };
+                    if tx.send(signal).is_err() {
+                        return;
+                    }
+                    while !reader.is_buffer_empty() {
+                        if let Ok(ev) = reader.next() {
+                            let s = if ev.events().contains(inotify::ReadFlags::QUEUE_OVERFLOW) {
+                                WatchSignal::Overflow
+                            } else {
+                                WatchSignal::Changed
+                            };
+                            let _ = tx.send(s);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(_) => {
                     let _ = tx.send(WatchSignal::Failed);
                     return;
                 }

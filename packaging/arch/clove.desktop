@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Clove
+Comment=Browse files and disk usage
+Exec=clove
+Icon=clove
+Terminal=false
+Categories=System;FileManager;Utility;
+Keywords=files;file manager;disk;storage;
+StartupNotify=true
+StartupWMClass=Clove

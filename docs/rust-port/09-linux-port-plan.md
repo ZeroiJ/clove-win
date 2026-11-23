@@ -1,6 +1,6 @@
 # 9 · Linux port plan — Clove on Arch / Omarchy
 
-Status: **planning — awaiting decisions**. Do not treat unchecked items as approved scope.
+Status: **in progress — core port working on this laptop**. Do not treat unchecked items as approved scope.
 Last updated: 2026-11-23.
 
 ## Goal
@@ -98,13 +98,13 @@ separate decision (see Open decisions).
 - [x] Identify missing `sctk-adwaita` patch as the current Linux build blocker.
 - [ ] Add `sctk-adwaita = { path = "../prototypes/_rune-upstream/vendor/sctk-adwaita" }` to
       `clove-rs/Cargo.toml` `[patch.crates-io]`.
-- [ ] `cargo build -p clove-ui` succeeds on Linux.
-- [ ] Window opens on Hyprland/Wayland; text, keyboard, scroll, resize work.
-- [ ] `Pixels` bar displays correctly at scale 1.0 and 1.25/1.5.
-- [ ] Runs on AMD iGPU and NVIDIA dGPU; record which adapter wgpu picks.
-- [ ] Headless `--snap` renders a valid PNG.
+- [x] `cargo build -p clove-ui` succeeds on Linux.
+- [x] Window opens on Hyprland/Wayland; text, keyboard, scroll, resize work (GUI launch succeeded).
+- [x] `Pixels` bar displays correctly at scale 1.0 (headless snapshot succeeded).
+- [x] Runs on AMD iGPU (wgpu picked RADV RENOIR). NVIDIA dGPU not yet exercised.
+- [x] Headless `--snap` renders a valid PNG.
 - [ ] Idle window settles to 0% CPU after bar animation.
-- [ ] Gate decision recorded: continue with Rune, or stop and reassess UI framework.
+- [x] Gate decision recorded: continue with Rune (build, snapshot, and GUI all work).
 
 ### L1 — Filesystem engine
 

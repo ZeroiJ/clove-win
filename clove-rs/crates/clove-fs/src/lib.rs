@@ -99,9 +99,9 @@ pub fn list_dir(dir: impl AsRef<Path>) -> io::Result<Snapshot> {
             metadata.as_ref().map(|m| m.len()).unwrap_or(0)
         };
         let modified = metadata.as_ref().and_then(|m| m.modified().ok());
-        let (hidden, system) = attributes(&metadata);
 
         let name = item.file_name().to_string_lossy().into_owned();
+        let (hidden, system) = attributes(&name, &metadata);
         entries.push(Entry {
             name_folded: name.to_lowercase(),
             name,
@@ -128,7 +128,7 @@ pub fn list_dir(dir: impl AsRef<Path>) -> io::Result<Snapshot> {
 }
 
 #[cfg(windows)]
-fn attributes(metadata: &Option<std::fs::Metadata>) -> (bool, bool) {
+fn attributes(_name: &str, metadata: &Option<std::fs::Metadata>) -> (bool, bool) {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
     const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
@@ -145,8 +145,8 @@ fn attributes(metadata: &Option<std::fs::Metadata>) -> (bool, bool) {
 }
 
 #[cfg(not(windows))]
-fn attributes(_metadata: &Option<std::fs::Metadata>) -> (bool, bool) {
-    (false, false)
+fn attributes(name: &str, _metadata: &Option<std::fs::Metadata>) -> (bool, bool) {
+    (name.starts_with('.'), false)
 }
 
 /// Absolute path with the Windows extended-length prefix when the path is long.
