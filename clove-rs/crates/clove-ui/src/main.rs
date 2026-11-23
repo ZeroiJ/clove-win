@@ -370,6 +370,7 @@ fn navigate(s: &mut State, location: Location) {
     sync_address(s);
     if s.tabs.is_empty() { s.tabs.push(s.location.clone()); }
     if s.active_tab < s.tabs.len() { s.tabs[s.active_tab] = s.location.clone(); }
+    save_tabs(s);
     s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), Vec::new()));
     s.filtered.clear();
     s.selected.clear();
@@ -1152,6 +1153,7 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     if ev.is_command('t') {
         s.tabs.push(s.location.clone());
         s.active_tab = s.tabs.len() - 1;
+        save_tabs(s);
         s.status = format!("tab {}", s.active_tab + 1);
         return true;
     }
@@ -1159,6 +1161,7 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         if s.tabs.len() > 1 {
             s.tabs.remove(s.active_tab);
             if s.active_tab >= s.tabs.len() { s.active_tab = s.tabs.len() - 1; }
+            save_tabs(s);
             let target = s.tabs[s.active_tab].clone();
             navigate(s, target);
             sync_address(s);
@@ -2657,6 +2660,42 @@ fn save_settings(s: &State) {
     }
 }
 
+fn tabs_path() -> Option<PathBuf> {
+    Some(platform::config_dir().join("clove").join("tabs.txt"))
+}
+
+fn save_tabs(s: &State) {
+    if let Some(path) = tabs_path() {
+        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+        let mut lines = Vec::new();
+        for loc in &s.tabs {
+            match loc {
+                Location::ThisPc => lines.push("thispc".to_string()),
+                Location::Folder(p) => lines.push(p.to_string_lossy().to_string()),
+            }
+        }
+        let _ = std::fs::write(path, lines.join("\n"));
+    }
+}
+
+fn load_tabs() -> Vec<Location> {
+    let Some(path) = tabs_path() else { return vec![Location::ThisPc]; };
+    let text = std::fs::read_to_string(path).ok().unwrap_or_default();
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        if line.eq_ignore_ascii_case("thispc") {
+            out.push(Location::ThisPc);
+        } else {
+            let p = PathBuf::from(line);
+            if p.exists() { out.push(Location::Folder(p)); }
+        }
+    }
+    if out.is_empty() { out.push(Location::ThisPc); }
+    out
+}
+
 fn storage_cache_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -2815,7 +2854,7 @@ fn build_state(handle: AppHandle<State>) -> State {
         batch_rename_suffix: TextEdit::new(""),
         thumbnails: std::collections::HashMap::new(),
         thumbnail_pending: std::collections::HashSet::new(),
-        tabs: vec![Location::ThisPc],
+        tabs: load_tabs(),
         active_tab: 0,
         show_hidden,
         status: String::new(),
