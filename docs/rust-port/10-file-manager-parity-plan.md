@@ -33,7 +33,7 @@ people expect from a daily file manager. Do not lose the no-index, fast-listing 
 
 ## Phase FM3 — Content and metadata (1–2 weeks)  [partial]
 
-- [~] Thumbnail cache: images done in-memory; no eviction/bytes cap, no video/PDF yet.
+- [x] Thumbnail cache: images+svg in-memory with 64MB byte-cap eviction. No video/PDF (needs ffmpeg/poppler deps).
 - [x] Archive extract-on-navigate (tar/zip/7z/rar via system tools). Virtual browsing deferred.
 - [x] Git badge: branch + dirty icon in header.
 - [x] Extended properties: perms, owner (uid), size, SHA256 checksum.
