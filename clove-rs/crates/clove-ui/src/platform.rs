@@ -38,53 +38,73 @@ pub fn quick_access() -> Vec<(&'static str, PathBuf)> {
     let home = home_dir();
     let mut items = Vec::new();
     let candidates = [
-        ("Desktop", home.join("Desktop")),
+        ("Home", home.clone()),
         ("Documents", home.join("Documents")),
         ("Downloads", home.join("Downloads")),
-        ("Pictures", home.join("Pictures")),
         ("Music", home.join("Music")),
+        ("Pictures", home.join("Pictures")),
         ("Videos", home.join("Videos")),
+        ("Trash", home.join(".local/share/Trash/files")),
     ];
     for (name, path) in candidates {
-        if path.exists() {
+        if path.exists() || name == "Trash" || name == "Home" {
             items.push((name, path));
         }
     }
     items
 }
 
-/// Mount points worth showing in "This PC", plus the root filesystem.
+/// Real mounted storage devices worth showing in the sidebar and locations.
 pub fn mount_entries() -> Vec<(String, PathBuf)> {
     let mut entries = Vec::new();
-    entries.push(("/".to_string(), PathBuf::from("/")));
+    entries.push(("Computer".to_string(), PathBuf::from("/")));
 
-    // Removable/media mounts and any extra real filesystems.
+    #[cfg(target_os = "linux")]
     if let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") {
         for line in text.lines() {
-            let mut parts = line.split_whitespace();
-            // mountinfo: ... mountpoint ... - fstype source super
-            // Fields are variable; the mount point is field 5 (1-based) in the common case.
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 5 {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let Some(sep_idx) = parts.iter().position(|&x| x == "-") else {
+                continue;
+            };
+            if parts.len() <= sep_idx + 2 || parts.len() < 5 {
                 continue;
             }
-            let mount_point = fields[4];
+            let mount_point = parts[4];
+            let fs_type = parts[sep_idx + 1];
+            let source = parts[sep_idx + 2];
+
             if mount_point == "/" {
                 continue;
             }
-            // Skip pseudo/virtual filesystems.
-            let fs_type = fields.iter().rev().take(3).nth(1).copied().unwrap_or("");
-            if matches!(
-                fs_type,
-                "proc" | "sysfs" | "tmpfs" | "devtmpfs" | "devpts" | "cgroup" | "cgroup2"
-                    | "pstore" | "bpf" | "tracefs" | "debugfs" | "securityfs" | "configfs"
-                    | "fusectl" | "mqueue" | "hugetlbfs" | "ramfs" | "overlay" | "squashfs"
-            ) {
-                continue;
-            }
-            let path = PathBuf::from(mount_point);
-            if path.exists() {
-                entries.push((mount_point.to_string(), path));
+            // User-visible media and external drives.
+            if mount_point.starts_with("/media/")
+                || mount_point.starts_with("/run/media/")
+                || mount_point.starts_with("/mnt/")
+            {
+                let name = Path::new(mount_point)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| mount_point.to_string());
+                entries.push((name, PathBuf::from(mount_point)));
+            } else if mount_point == "/boot" {
+                entries.push(("Boot".to_string(), PathBuf::from("/boot")));
+            } else if source.starts_with("/dev/")
+                && matches!(
+                    fs_type,
+                    "ext4" | "btrfs" | "xfs" | "vfat" | "ntfs" | "exfat" | "f2fs"
+                )
+                && !mount_point.starts_with("/var/")
+                && !mount_point.starts_with("/tmp/")
+                && !mount_point.starts_with("/dev/")
+                && !mount_point.starts_with("/sys/")
+                && !mount_point.starts_with("/proc/")
+                && !mount_point.starts_with("/run/")
+            {
+                let name = Path::new(mount_point)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| mount_point.to_string());
+                entries.push((name, PathBuf::from(mount_point)));
             }
         }
     }
