@@ -10,45 +10,6 @@ permissions:
   contents: write
 
 jobs:
-  build-macos:
-    name: Build macOS app
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build Clove (Swift)
-        run: |
-          xcodebuild -project Clove.xcodeproj -scheme Clove -configuration Release \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build
-      - name: Package app
-        run: |
-          APP=$(find ~/Library/Developer/Xcode/DerivedData -name "Clove.app" -type d | head -1)
-          ditto -c -k --keepParent "$APP" clove-macos.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: clove-macos
-          path: clove-macos.zip
-
-  build-windows:
-    name: Build Windows app
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Fetch pinned Rune checkout
-        shell: bash
-        run: |
-          git clone --depth 1 https://github.com/anomalyco/rune.git prototypes/_rune-upstream
-          cd prototypes/_rune-upstream
-          git fetch --depth 1 origin db301c06ab0d68b70c4822a542fffc6615bbd419
-          git checkout db301c06ab0d68b70c4822a542fffc6615bbd419
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build clove-ui
-        working-directory: clove-rs
-        run: cargo build -p clove-ui --release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: clove-windows
-          path: clove-rs/target/release/clove.exe
-
   build-arch:
     name: Build Arch package
     runs-on: ubuntu-latest
@@ -58,7 +19,7 @@ jobs:
       - name: Install build dependencies
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm --needed base-devel rust cargo git
+          pacman -S --noconfirm --needed base-devel rust cargo git libxkbcommon wayland fontconfig
       - name: Fetch pinned Rune checkout
         run: |
           git clone --depth 1 https://github.com/anomalyco/rune.git prototypes/_rune-upstream
@@ -82,9 +43,9 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [build-macos, build-windows, build-arch]
+    needs: [build-arch]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -92,7 +53,5 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/clove-macos/clove-macos.zip
-            artifacts/clove-windows/clove.exe
             artifacts/clove-arch/clove-arch.tar.gz
           generate_release_notes: true
