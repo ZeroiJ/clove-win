@@ -290,7 +290,7 @@ impl BarRenderer {
         let ox = (width_pts - cols as f32 * PITCH) / 2.0;
         let oy = (height_pts - rows as f32 * PITCH) / 2.0;
         for j in 0..rows {
-            let cy = oy + (j as f32 + 0.5) * PITCH;
+            let _cy = oy + (j as f32 + 0.5) * PITCH;
             for i in 0..cols {
                 let c = j * cols + i;
                 let cx = ox + (i as f32 + 0.5) * PITCH;

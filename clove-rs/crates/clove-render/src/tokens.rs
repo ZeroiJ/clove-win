@@ -23,22 +23,32 @@ impl Rgb {
     }
 }
 
-/// Palette (dark).
-pub const BG: Rgb = Rgb(0x1D, 0x1E, 0x20);
-pub const SURFACE: Rgb = Rgb(0x2D, 0x2E, 0x30);
-pub const INK: Rgb = Rgb(0xF4, 0xF5, 0xF6);
-pub const INK_SECONDARY: Rgb = Rgb(0xB2, 0xB4, 0xB8);
-pub const HAIRLINE: Rgb = Rgb(0x3C, 0x3D, 0x3F);
-pub const ACCENT: Rgb = Rgb(0x6B, 0xAD, 0xFF);
+/// Palette (Vesper dark / Omarchy).
+pub const BG: Rgb = Rgb(0x10, 0x11, 0x14);
+pub const SIDEBAR_BG: Rgb = Rgb(0x15, 0x16, 0x19);
+pub const SURFACE: Rgb = Rgb(0x1E, 0x20, 0x24);
+pub const SURFACE_HOVER: Rgb = Rgb(0x27, 0x29, 0x2E);
+pub const SURFACE_ACTIVE: Rgb = Rgb(0x31, 0x33, 0x3A);
+pub const INK: Rgb = Rgb(0xFA, 0xFA, 0xFA);
+pub const INK_SECONDARY: Rgb = Rgb(0x9E, 0xA1, 0xA8);
+pub const INK_MUTED: Rgb = Rgb(0x5A, 0x5D, 0x66);
+pub const HAIRLINE: Rgb = Rgb(0x22, 0x24, 0x28);
+pub const ACCENT: Rgb = Rgb(0xFF, 0xC7, 0x99); // Vesper peach/accent
+pub const ACCENT_MUTED: Rgb = Rgb(0x3A, 0x2F, 0x24);
+pub const FOLDER_ORANGE: Rgb = Rgb(0xE9, 0x54, 0x20); // Yaru terracotta orange
+pub const SUCCESS: Rgb = Rgb(0x99, 0xFF, 0xE4); // Vesper mint
+pub const WARNING: Rgb = Rgb(0xFF, 0xC7, 0x99); // Vesper orange/yellow
+pub const DANGER: Rgb = Rgb(0xFF, 0x80, 0x80);  // Vesper red
 
 /// Spacing scale (points), from `Metrics.swift`.
 pub const SPACING: [f32; 5] = [4.0, 8.0, 12.0, 16.0, 24.0];
 
 /// Corner radii (points), from `Metrics.swift`.
-pub const RADIUS_CARD: f32 = 16.0;
-pub const RADIUS_CONTROL: f32 = 7.0;
+pub const RADIUS_CARD: f32 = 12.0;
+pub const RADIUS_CONTROL: f32 = 6.0;
 pub const RADIUS_ROW: f32 = 6.0;
-pub const RADIUS_BAR: f32 = 10.0;
+pub const RADIUS_BAR: f32 = 8.0;
+pub const RADIUS_PILL: f32 = 999.0;
 
 /// Typography scale (size pt, weight), from `Typography.swift`.
 pub const TYPE_BODY: (f32, f32) = (13.0, 400.0);

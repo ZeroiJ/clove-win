@@ -27,6 +27,7 @@ pub fn cache_dir() -> PathBuf {
         .unwrap_or_else(|| home_dir().join(".cache"))
 }
 
+#[allow(dead_code)]
 pub fn data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -38,73 +39,54 @@ pub fn quick_access() -> Vec<(&'static str, PathBuf)> {
     let home = home_dir();
     let mut items = Vec::new();
     let candidates = [
-        ("Home", home.clone()),
-        ("Documents", home.join("Documents")),
         ("Downloads", home.join("Downloads")),
-        ("Music", home.join("Music")),
+        ("Projects", home.join("Projects")),
         ("Pictures", home.join("Pictures")),
         ("Videos", home.join("Videos")),
-        ("Trash", home.join(".local/share/Trash/files")),
+        ("Music", home.join("Music")),
+        ("Documents", home.join("Documents")),
+        ("Work", home.join("Work")),
+        ("Desktop", home.join("Desktop")),
     ];
     for (name, path) in candidates {
-        if path.exists() || name == "Trash" || name == "Home" {
+        if path.exists() {
             items.push((name, path));
         }
     }
     items
 }
 
-/// Real mounted storage devices worth showing in the sidebar and locations.
+/// Mount points worth showing in "This PC", plus the root filesystem.
 pub fn mount_entries() -> Vec<(String, PathBuf)> {
     let mut entries = Vec::new();
-    entries.push(("Computer".to_string(), PathBuf::from("/")));
+    entries.push(("/".to_string(), PathBuf::from("/")));
 
-    #[cfg(target_os = "linux")]
+    // Removable/media mounts and any extra real filesystems.
     if let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") {
         for line in text.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            let Some(sep_idx) = parts.iter().position(|&x| x == "-") else {
-                continue;
-            };
-            if parts.len() <= sep_idx + 2 || parts.len() < 5 {
+            // mountinfo: ... mountpoint ... - fstype source super
+            // Fields are variable; the mount point is field 5 (1-based) in the common case.
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 5 {
                 continue;
             }
-            let mount_point = parts[4];
-            let fs_type = parts[sep_idx + 1];
-            let source = parts[sep_idx + 2];
-
+            let mount_point = fields[4];
             if mount_point == "/" {
                 continue;
             }
-            // User-visible media and external drives.
-            if mount_point.starts_with("/media/")
-                || mount_point.starts_with("/run/media/")
-                || mount_point.starts_with("/mnt/")
-            {
-                let name = Path::new(mount_point)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| mount_point.to_string());
-                entries.push((name, PathBuf::from(mount_point)));
-            } else if mount_point == "/boot" {
-                entries.push(("Boot".to_string(), PathBuf::from("/boot")));
-            } else if source.starts_with("/dev/")
-                && matches!(
-                    fs_type,
-                    "ext4" | "btrfs" | "xfs" | "vfat" | "ntfs" | "exfat" | "f2fs"
-                )
-                && !mount_point.starts_with("/var/")
-                && !mount_point.starts_with("/tmp/")
-                && !mount_point.starts_with("/dev/")
-                && !mount_point.starts_with("/sys/")
-                && !mount_point.starts_with("/proc/")
-                && !mount_point.starts_with("/run/")
-            {
-                let name = Path::new(mount_point)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| mount_point.to_string());
-                entries.push((name, PathBuf::from(mount_point)));
+            // Skip pseudo/virtual filesystems.
+            let fs_type = fields.iter().rev().take(3).nth(1).copied().unwrap_or("");
+            if matches!(
+                fs_type,
+                "proc" | "sysfs" | "tmpfs" | "devtmpfs" | "devpts" | "cgroup" | "cgroup2"
+                    | "pstore" | "bpf" | "tracefs" | "debugfs" | "securityfs" | "configfs"
+                    | "fusectl" | "mqueue" | "hugetlbfs" | "ramfs" | "overlay" | "squashfs"
+            ) {
+                continue;
+            }
+            let path = PathBuf::from(mount_point);
+            if path.exists() {
+                entries.push((mount_point.to_string(), path));
             }
         }
     }
@@ -176,6 +158,7 @@ pub fn open_terminal_here(dir: &Path) {
     }
 }
 
+#[allow(dead_code)]
 pub fn trash_name() -> &'static str {
     "Trash"
 }
