@@ -44,7 +44,7 @@ jobs:
 
       - name: Publish
         env:
-          GIT_SSH_COMMAND: "ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+          GIT_SSH_COMMAND: "ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
         run: |
           git clone ssh://aur@aur.archlinux.org/clove-linux.git aur-clove
           cp packaging/aur/PKGBUILD packaging/aur/.SRCINFO aur-clove/
