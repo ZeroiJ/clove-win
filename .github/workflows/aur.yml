@@ -27,7 +27,11 @@ jobs:
 
       - name: Generate .SRCINFO
         working-directory: packaging/aur
-        run: makepkg --printsrcinfo > .SRCINFO
+        run: |
+          # makepkg refuses to run as root; use an unprivileged user.
+          useradd -m builder 2>/dev/null || true
+          chown -R builder .
+          su builder -c 'makepkg --printsrcinfo' > .SRCINFO
 
       - name: Configure SSH
         env:
@@ -48,5 +52,5 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add PKGBUILD .SRCINFO
-          git commit -m "Update to ${{ github.ref_name }}" || echo "nothing to commit"
+          git commit -m "Update to $(grep '^pkgver=' PKGBUILD | cut -d= -f2)" || echo "nothing to commit"
           git push
