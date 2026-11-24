@@ -6,7 +6,7 @@
 # dependencies for Rune and its patched vendor crates.
 
 pkgname=clove-linux
-pkgver=0.1.3
+pkgver=0.1.4
 pkgrel=1
 pkgdesc="Fast dithered-storage file manager"
 arch=('x86_64')
@@ -22,7 +22,7 @@ depends=(
 makedepends=('cargo' 'git' 'rust')
 options=('!debug')
 
-_branch=linux-port
+_branch=main
 _runerev=db301c06ab0d68b70c4822a542fffc6615bbd419
 
 source=(
@@ -38,7 +38,6 @@ prepare() {
   if [ ! -d prototypes/_rune-upstream ]; then
     mv prototypes/rune-${_runerev} prototypes/_rune-upstream
   fi
-  mv "prototypes/rune-${_runerev}" "prototypes/_rune-upstream"
 }
 
 build() {
