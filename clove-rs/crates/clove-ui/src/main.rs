@@ -906,7 +906,8 @@ fn run_progress(cmd: &mut std::process::Command, cancel: &std::sync::atomic::Ato
 }
 
 fn count_files(path: &Path) -> usize {
-    if path.is_dir() {
+    let is_link = path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false);
+    if path.is_dir() && !is_link {
         std::fs::read_dir(path).map(|rd| rd.flatten().map(|e| count_files(&e.path())).sum()).unwrap_or(0)
     } else { 1 }
 }
@@ -3261,9 +3262,12 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                                 let handle = s.handle.clone();
                                 s.op_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
                                 let cancel = s.op_cancel.clone();
-                                let total = paths.iter().map(|p| count_files(p)).sum::<usize>().max(1);
-                                s.op_progress = Some(FileOpProgress { label: "Compressing".into(), done: 0, total, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
+                                s.op_progress = Some(FileOpProgress { label: "Compressing".into(), done: 0, total: 0, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
                                 std::thread::spawn(move || {
+                                    let total = paths.iter().map(|p| count_files(p)).sum::<usize>().max(1);
+                                    handle.update(move |s, _| {
+                                        if let Some(op) = &mut s.op_progress { op.total = total; }
+                                    });
                                     let mut args = vec!["czvf".to_string(), dest.to_string_lossy().to_string()];
                                     for p in &paths { args.push(p.to_string_lossy().to_string()); }
                                     let mut cmd = std::process::Command::new("tar");
@@ -3290,9 +3294,12 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                                         let p = path.clone();
                                         s.op_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
                                         let cancel = s.op_cancel.clone();
-                                        let total = archive_entry_count(&p);
-                                        s.op_progress = Some(FileOpProgress { label: "Extracting".into(), done: 0, total, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
+                                        s.op_progress = Some(FileOpProgress { label: "Extracting".into(), done: 0, total: 0, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
                                         std::thread::spawn(move || {
+                                            let total = archive_entry_count(&p);
+                                            handle.update(move |s, _| {
+                                                if let Some(op) = &mut s.op_progress { op.total = total; }
+                                            });
                                             let mut cmd = if p.to_string_lossy().ends_with(".zip") {
                                                 let mut c = std::process::Command::new("unzip");
                                                 c.args(["-o", &p.to_string_lossy(), "-d", &target.to_string_lossy()]);
