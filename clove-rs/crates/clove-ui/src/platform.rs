@@ -95,6 +95,13 @@ pub fn mount_entries() -> Vec<(String, PathBuf)> {
     entries
 }
 
+#[cfg(target_os = "linux")]
+fn open_command(path: &Path) -> Command {
+    let mut c = Command::new("xdg-open");
+    c.arg(path);
+    c
+}
+
 pub fn open_path(path: &Path) {
     #[cfg(target_os = "windows")]
     {
@@ -102,7 +109,8 @@ pub fn open_path(path: &Path) {
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = Command::new("xdg-open").arg(path).spawn();
+        let mut c = open_command(path);
+        let _ = c.spawn();
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
@@ -150,4 +158,49 @@ pub fn open_terminal_here(dir: &Path) {
 
 pub fn trash_name() -> &'static str {
     "Trash"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quick_access_returns_vec() {
+        let _ = quick_access();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn mounts_parse() {
+        let mounts = mount_entries();
+        assert!(!mounts.is_empty(), "/proc/mounts should list at least the root");
+    }
+
+    #[test]
+    fn dirs_nonempty() {
+        assert!(!config_dir().as_os_str().is_empty());
+        assert!(!cache_dir().as_os_str().is_empty());
+        assert!(!data_dir().as_os_str().is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn open_command_uses_xdg_open() {
+        let cmd = open_command(Path::new("/tmp/clove-open-test"));
+        assert_eq!(cmd.get_program(), "xdg-open");
+    }
+
+    #[test]
+    fn trash_refuses_outside_root() {
+        let base = std::env::temp_dir().join("clove_test_trash");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let outside = base.join("outside.txt");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, b"x").unwrap();
+        let outcome = clove_shell::trash(&outside, &root, false);
+        assert_eq!(outcome.failures, 1);
+        assert!(outside.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

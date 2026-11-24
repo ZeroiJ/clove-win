@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use rune::tok::type_;
 use rune::{
-    col, el, row, text, text_input, App, AppHandle, AppSpec, Color, Cx, El, GrowthSpec, Key,
-    KeyEvent, Pixels, ScrollSpec, TextEdit, Tx,
+    col, el, row, text, text_input, App, AppHandle, AppSpec, Color, Cx, DragItem, El, GrowthSpec,
+    Key, KeyEvent, Pixels, ScrollSpec, TextEdit, Tx,
 };
 
 mod platform;
@@ -155,9 +155,12 @@ struct State {
     properties_size: Option<u64>,
     properties_loading: bool,
     properties_checksum: Option<String>,
+    properties_mime: Option<String>,
+    properties_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     renaming: Option<usize>,
     rename_text: TextEdit,
     context_menu: Option<usize>,
+    drop_hover: bool,
     // Conflict resolution.
     conflict_policy: u8, // 0 auto-rename, 1 ask
     pending_paste: Option<(PathBuf, Vec<PathBuf>, bool)>,
@@ -206,6 +209,9 @@ struct State {
     ui_scale: f32,
     show_hidden: bool,
     show_shortcuts: bool,
+    keybinds: Vec<(String, String)>,
+    customizing: Option<usize>,
+    custom_key: Option<String>,
 }
 
 impl State {
@@ -853,6 +859,68 @@ fn extract_archive(src: &Path, target: &Path) -> bool {
     res.map(|r| r.success()).unwrap_or(false)
 }
 
+fn run_progress(cmd: &mut std::process::Command, cancel: &std::sync::atomic::AtomicBool, handle: &AppHandle<State>) -> bool {
+    // GNU tar prints verbose names on stderr; unzip and 7z use stdout.
+    let use_stderr = cmd.get_program().to_string_lossy() == "tar";
+    if use_stderr {
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
+    } else {
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::null());
+    }
+    let mut child = match cmd.spawn() { Ok(c) => c, Err(_) => return false };
+    let stream: Option<Box<dyn std::io::Read + Send>> = if use_stderr {
+        child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)
+    } else {
+        child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)
+    };
+    let h = handle.clone();
+    let reader = std::thread::spawn(move || {
+        let mut count = 0usize;
+        if let Some(out) = stream {
+            use std::io::BufRead;
+            for _ in std::io::BufReader::new(out).lines() {
+                count += 1;
+                let c = count;
+                h.update(move |s, _| {
+                    if let Some(op) = &mut s.op_progress { op.done = c; }
+                });
+            }
+        }
+        count
+    });
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return false;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => { let _ = reader.join(); return status.success(); }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(_) => { let _ = reader.join(); return false; }
+        }
+    }
+}
+
+fn count_files(path: &Path) -> usize {
+    if path.is_dir() {
+        std::fs::read_dir(path).map(|rd| rd.flatten().map(|e| count_files(&e.path())).sum()).unwrap_or(0)
+    } else { 1 }
+}
+
+fn archive_entry_count(path: &Path) -> usize {
+    let lower = path.to_string_lossy().to_lowercase();
+    let out = if lower.ends_with(".zip") {
+        std::process::Command::new("unzip").args(["-Z1", &path.to_string_lossy()]).output().ok()
+    } else {
+        std::process::Command::new("tar").args(["tf", &path.to_string_lossy()]).output().ok()
+    };
+    out.map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0)
+}
+
 fn file_checksum(path: &Path) -> Option<String> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).ok()?;
@@ -1022,14 +1090,16 @@ fn props_owner(path: &Path) -> String {
     "unknown".to_string()
 }
 
-fn dir_size(path: &Path) -> u64 {
+fn dir_size(path: &Path, cancel: &std::sync::atomic::AtomicBool) -> u64 {
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) { return 0; }
     let mut total = 0u64;
     if let Ok(rd) = std::fs::read_dir(path) {
         for entry in rd.flatten() {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) { return total; }
             let p = entry.path();
             if let Ok(ft) = entry.file_type() {
                 if ft.is_dir() {
-                    total += dir_size(&p);
+                    total += dir_size(&p, cancel);
                 } else {
                     total += entry.metadata().map(|m| m.len()).unwrap_or(0);
                 }
@@ -1065,6 +1135,31 @@ fn refresh_git(s: &mut State) {
     s.git_dirty = dirty;
 }
 
+fn thumbnail_external(path: &Path) -> Option<image::DynamicImage> {
+    // shortcut: external ffmpeg/pdftoppm, silent fallback when absent.
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if matches!(ext.as_str(), "mp4" | "mkv" | "webm" | "mov" | "avi") {
+        let out = std::process::Command::new("ffmpeg")
+            .args(["-y", "-ss", "1", "-i"]).arg(path)
+            .args(["-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"])
+            .output().ok()?;
+        if !out.status.success() || out.stdout.is_empty() { return None; }
+        return image::load_from_memory(&out.stdout).ok();
+    }
+    if ext == "pdf" {
+        let prefix = platform::cache_dir().join("clove").join("thumbs").join(format!("pdf-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(prefix.parent()?);
+        let status = std::process::Command::new("pdftoppm")
+            .args(["-png", "-singlefile", "-f", "1", "-l", "1"])
+            .arg(path).arg(&prefix).status().ok()?;
+        if !status.success() { return None; }
+        let img = image::open(prefix.with_extension("png")).ok();
+        let _ = std::fs::remove_file(prefix.with_extension("png"));
+        return img;
+    }
+    None
+}
+
 fn load_thumbnails(s: &mut State) {
     let entries: Vec<(usize, PathBuf)> = s
         .snapshot
@@ -1075,7 +1170,7 @@ fn load_thumbnails(s: &mut State) {
             if e.is_dir { return None; }
             let path = entry_path(&s.location, e)?;
             let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
-            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg") {
+            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "mp4" | "mkv" | "webm" | "mov" | "avi" | "pdf") {
                 return None;
             }
             if s.thumbnails.contains_key(&path) || s.thumbnail_pending.contains(&path) {
@@ -1091,7 +1186,7 @@ fn load_thumbnails(s: &mut State) {
         std::thread::spawn(move || {
             let mut rgba = None;
             let mut dims = None;
-            if let Ok(img) = image::open(&path2) {
+            if let Some(img) = image::open(&path2).ok().or_else(|| thumbnail_external(&path2)) {
                 let thumb = img.thumbnail(64, 64);
                 let rgba8 = thumb.to_rgba8();
                 dims = Some((rgba8.width(), rgba8.height()));
@@ -1128,6 +1223,16 @@ fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn handle_drop_files(s: &mut State, paths: &[std::path::PathBuf], _tx: &mut Tx) {
+    if let Location::Folder(dir) = s.location.clone() {
+        if !paths.is_empty() {
+            s.status = format!("dropped {} file(s)", paths.len());
+            run_paste(s, dir, paths.to_vec(), false, 0);
+        }
+    }
+    s.drop_hover = false;
 }
 
 fn do_paste(s: &mut State) {
@@ -1255,84 +1360,413 @@ fn run_paste(s: &mut State, target: PathBuf, paths: Vec<PathBuf>, cut: bool, mod
 }
 
 
+fn ev_is_command(ev: &KeyEvent, c: char) -> bool {
+    matches!(ev.key, Key::Command(k) if k.to_ascii_lowercase() == c.to_ascii_lowercase())
+}
+
+fn ev_char(ev: &KeyEvent) -> Option<char> {
+    match &ev.key {
+        Key::Command(c) => Some(c.to_ascii_lowercase()),
+        Key::Text(t) => t.chars().next().map(|c| c.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+fn ev_name(ev: &KeyEvent) -> String {
+    match &ev.key {
+        Key::Function(n) => format!("f{n}"),
+        Key::Enter => "enter".into(),
+        Key::Backspace => "backspace".into(),
+        Key::Delete => "delete".into(),
+        Key::Escape => "escape".into(),
+        Key::Tab => "tab".into(),
+        Key::Up => "up".into(),
+        Key::Down => "down".into(),
+        Key::Left => "left".into(),
+        Key::Right => "right".into(),
+        Key::Home => "home".into(),
+        Key::End => "end".into(),
+        Key::PageUp => "pageup".into(),
+        Key::PageDown => "pagedown".into(),
+        Key::Command(c) => c.to_ascii_lowercase().to_string(),
+        Key::Text(c) => c.to_ascii_lowercase(),
+        _ => String::new(),
+    }
+}
+
+fn ev_canonical(ev: &KeyEvent) -> String {
+    let mut parts = Vec::new();
+    if ev.mods.ctrl { parts.push("ctrl"); }
+    if ev.mods.alt { parts.push("alt"); }
+    if ev.mods.shift { parts.push("shift"); }
+    if ev.mods.cmd { parts.push("cmd"); }
+    let name = ev_name(ev);
+    if name.is_empty() { return String::new(); }
+    parts.push(&name);
+    // leak-free: build owned
+    let mut out = String::new();
+    for (i,p) in parts.iter().enumerate() {
+        if i>0 { out.push('+'); }
+        out.push_str(p);
+    }
+    out
+}
+
+fn kb_canonical(kb: &str) -> String {
+    let b = kb.trim().to_ascii_lowercase();
+    let mut ctrl=false; let mut alt=false; let mut shift=false; let mut cmd=false;
+    let mut key = String::new();
+    for part in b.split('+') {
+        match part.trim() {
+            "ctrl"|"control" => ctrl=true,
+            "alt" => alt=true,
+            "shift" => shift=true,
+            "cmd"|"meta"|"super"|"command" => cmd=true,
+            k => key = k.to_string(),
+        }
+    }
+    if key.is_empty() { return String::new(); }
+    let mut out = String::new();
+    if ctrl { out.push_str("ctrl+"); }
+    if alt { out.push_str("alt+"); }
+    if shift { out.push_str("shift+"); }
+    if cmd { out.push_str("cmd+"); }
+    out.push_str(&key);
+    out
+}
+
+fn key_is_bound(s: &State, ev: &KeyEvent) -> Option<String> {
+    let evc = ev_canonical(ev);
+    if evc.is_empty() { return None; }
+    for (action, kb) in &s.keybinds {
+        if kb_canonical(kb) == evc { return Some(action.clone()); }
+    }
+    None
+}
+
+fn handle_action(s: &mut State, action: &str) -> bool {
+    match action {
+        "undo" => { undo_delete(s); true }
+        "copy" => { do_copy(s); true }
+        "cut" => {
+            do_copy(s);
+            s.clipboard_cut = true;
+            let n = s.clipboard.len();
+            if n > 0 { s.status = format!("cut {n} item(s)"); }
+            true
+        }
+        "paste" => { do_paste(s); true }
+        "new-file" => { do_new_file(s); true }
+        "new-folder" => { do_new_folder(s); true }
+        "rename" => { start_rename(s); true }
+        "delete" => { delete_selected(s); true }
+        "delete-permanent" => { do_permanent_delete(s); true }
+        "properties" => { open_properties(s); true }
+        "search" => { s.search_mode = !s.search_mode; save_settings(s); true }
+        "hidden" => {
+            s.show_hidden = !s.show_hidden;
+            refilter(s);
+            save_settings(s);
+            s.status = if s.show_hidden { "showing hidden files".into() } else { "hidden files hidden".into() };
+            true
+        }
+        "shortcuts" => { s.show_shortcuts = !s.show_shortcuts; true }
+        "new-tab" => { s.tabs.push(s.location.clone()); s.active_tab = s.tabs.len() - 1; save_tabs(s); true }
+        "close-tab" => {
+            if s.tabs.len() > 1 {
+                s.tabs.remove(s.active_tab);
+                if s.active_tab >= s.tabs.len() { s.active_tab = s.tabs.len() - 1; }
+                let target = s.tabs[s.active_tab].clone();
+                navigate(s, target);
+                sync_address(s);
+                save_tabs(s);
+            }
+            true
+        }
+        "next-tab" => {
+            if !s.tabs.is_empty() {
+                s.active_tab = (s.active_tab + 1) % s.tabs.len();
+                let target = s.tabs[s.active_tab].clone();
+                navigate(s, target);
+                sync_address(s);
+            }
+            true
+        }
+        "view-details" => { s.view_mode = 0; save_settings(s); true }
+        "view-list" => { s.view_mode = 1; save_settings(s); true }
+        "view-grid" => { s.view_mode = 2; save_settings(s); s.status = "view: grid".into(); load_thumbnails(s); true }
+        "conflict-mode" => {
+            s.conflict_policy = if s.conflict_policy == 0 { 1 } else { 0 };
+            s.status = if s.conflict_policy == 0 { "conflicts: auto-rename".into() } else { "conflicts: ask".into() };
+            true
+        }
+        _ => false,
+    }
+}
+
+fn do_copy(s: &mut State) {
+    let mut paths = Vec::new();
+    for &idx in &s.selected {
+        if let Some(e) = s.snapshot.entries.get(idx) {
+            if let Some(p) = entry_path(&s.location, e) { paths.push(p); }
+        }
+    }
+    if paths.is_empty() {
+        if let Some(&idx) = s.filtered.get(s.cursor) {
+            if let Some(e) = s.snapshot.entries.get(idx) {
+                if let Some(p) = entry_path(&s.location, e) { paths.push(p); }
+            }
+        }
+    }
+    if !paths.is_empty() {
+        s.clipboard = paths.clone();
+        s.clipboard_cut = false;
+        let p2 = paths.clone();
+        std::thread::spawn(move || { if let Ok(mut cb) = arboard::Clipboard::new() { let _ = cb.set().file_list(&p2); } });
+        s.status = format!("copied {} item(s)", paths.len());
+    }
+}
+
+fn do_new_file(s: &mut State) {
+    if let Location::Folder(root) = s.location.clone() {
+        let mut name = "New file".to_string();
+        let mut n = 1u32;
+        while root.join(&name).exists() { n += 1; name = format!("New file {n}"); }
+        let dest = root.join(&name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&dest) {
+            Ok(_) => { s.status = format!("created {name}"); reload(s); }
+            Err(_) => { s.status = "could not create file".into(); }
+        }
+    }
+}
+
+fn do_new_folder(s: &mut State) {
+    if let Location::Folder(root) = s.location.clone() {
+        let mut name = "New folder".to_string();
+        let mut n = 1u32;
+        while root.join(&name).exists() { n += 1; name = format!("New folder {n}"); }
+        match std::fs::create_dir(root.join(&name)) {
+            Ok(_) => { s.status = format!("created {name}"); reload(s); }
+            Err(_) => { s.status = "could not create folder".into(); }
+        }
+    }
+}
+
+fn start_rename(s: &mut State) {
+    if let Some(&idx) = s.filtered.get(s.cursor) {
+        s.renaming = Some(idx);
+        if let Some(e) = s.snapshot.entries.get(idx) { s.rename_text = TextEdit::new(&e.name); }
+    }
+}
+
+fn do_permanent_delete(s: &mut State) {
+    let mut paths = Vec::new();
+    for &idx in &s.selected {
+        if let Some(e) = s.snapshot.entries.get(idx) {
+            if let Some(p) = entry_path(&s.location, e) { paths.push(p); }
+        }
+    }
+    if paths.is_empty() {
+        if let Some(&idx) = s.filtered.get(s.cursor) {
+            if let Some(e) = s.snapshot.entries.get(idx) {
+                if let Some(p) = entry_path(&s.location, e) { paths.push(p); }
+            }
+        }
+    }
+    if paths.is_empty() { return; }
+    let handle = s.handle.clone();
+    s.status = "deleting permanently...".into();
+    std::thread::spawn(move || {
+        let mut done = 0usize; let mut fail = 0usize;
+        for p in &paths {
+            let res = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+            if res.is_ok() { done += 1; } else { fail += 1; }
+        }
+        handle.update(move |s, _| {
+            s.status = format!("permanent delete: {done} ok, {fail} failed");
+            reload(s);
+        });
+    });
+}
+
+fn open_properties(s: &mut State) {
+    if let Some(&idx) = s.filtered.get(s.cursor) {
+        if let Some(e) = s.snapshot.entries.get(idx) {
+            if let Some(p) = entry_path(&s.location, e) {
+                s.properties_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                s.properties_cancel = cancel.clone();
+                s.properties_path = Some(p.clone());
+                s.properties_size = None;
+                s.properties_loading = true;
+                s.properties_checksum = None;
+                s.properties_mime = None;
+                let path = p;
+                let handle = s.handle.clone();
+                std::thread::spawn(move || {
+                    let size = if path.is_dir() { dir_size(&path, &cancel) } else { path.metadata().map(|m| m.len()).unwrap_or(0) };
+                    let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
+                    let checksum = if !cancelled && path.is_file() { file_checksum(&path) } else { None };
+                    let mime = std::process::Command::new("file")
+                        .args(["-b", "--mime-type"])
+                        .arg(&path)
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    handle.update(move |s, _| {
+                        if cancelled { s.properties_loading = false; s.status = "properties: cancelled".into(); return; }
+                        s.properties_size = Some(size);
+                        s.properties_checksum = checksum;
+                        s.properties_mime = mime;
+                        s.properties_loading = false;
+                    });
+                });
+            }
+        }
+    }
+}
+
+fn keybinds_help() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        ("undo", "ctrl+z", "Restore last trash"),
+        ("copy", "ctrl+c", "Copy selection"),
+        ("cut", "ctrl+x", "Cut selection"),
+        ("paste", "ctrl+v", "Paste into folder"),
+        ("new-file", "ctrl+alt+n", "New empty file"),
+        ("new-folder", "ctrl+shift+n", "New folder"),
+        ("rename", "f2", "Rename"),
+        ("delete", "delete", "Trash selection"),
+        ("delete-permanent", "shift+delete", "Permanently delete"),
+        ("properties", "ctrl+i", "Properties"),
+        ("search", "ctrl+f", "Search in folder"),
+        ("hidden", "f7", "Toggle hidden files"),
+        ("shortcuts", "ctrl+/", "Keyboard shortcuts"),
+        ("new-tab", "ctrl+t", "New tab"),
+        ("close-tab", "ctrl+w", "Close tab"),
+        ("next-tab", "f6", "Next tab"),
+        ("view-details", "ctrl+1", "Details view"),
+        ("view-list", "ctrl+2", "List view"),
+        ("view-grid", "ctrl+3", "Grid view"),
+        ("conflict-mode", "ctrl+shift+c", "Conflict mode toggle"),
+    ]
+}
+
+fn default_keybinds() -> Vec<(String, String)> {
+    vec![
+        ("undo".to_string(), "ctrl+z".to_string()),
+        ("copy".to_string(), "ctrl+c".to_string()),
+        ("cut".to_string(), "ctrl+x".to_string()),
+        ("paste".to_string(), "ctrl+v".to_string()),
+        ("new-file".to_string(), "ctrl+alt+n".to_string()),
+        ("new-folder".to_string(), "ctrl+shift+n".to_string()),
+        ("rename".to_string(), "f2".to_string()),
+        ("delete".to_string(), "delete".to_string()),
+        ("delete-permanent".to_string(), "shift+delete".to_string()),
+        ("properties".to_string(), "ctrl+i".to_string()),
+        ("search".to_string(), "ctrl+f".to_string()),
+        ("hidden".to_string(), "f7".to_string()),
+        ("shortcuts".to_string(), "ctrl+/".to_string()),
+        ("new-tab".to_string(), "ctrl+t".to_string()),
+        ("close-tab".to_string(), "ctrl+w".to_string()),
+        ("next-tab".to_string(), "f6".to_string()),
+        ("view-details".to_string(), "ctrl+1".to_string()),
+        ("view-list".to_string(), "ctrl+2".to_string()),
+        ("view-grid".to_string(), "ctrl+3".to_string()),
+        ("conflict-mode".to_string(), "ctrl+shift+c".to_string()),
+    ]
+}
+
+fn keybinds_path() -> Option<PathBuf> {
+    Some(platform::config_dir().join("clove").join("keybinds.txt"))
+}
+
+fn save_keybinds(s: &State) {
+    if let Some(path) = keybinds_path() {
+        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+        let mut lines = Vec::new();
+        for (a, k) in &s.keybinds { lines.push(format!("{a}: {k}")); }
+        let _ = std::fs::write(path, lines.join("\n"));
+    }
+}
+
+fn load_keybinds() -> Vec<(String, String)> {
+    let mut out = default_keybinds();
+    if let Some(path) = keybinds_path() {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let mut loaded = Vec::new();
+            for line in text.lines() {
+                if let Some((a, k)) = line.split_once(": ") {
+                    let a = a.trim().to_string();
+                    let k = k.trim().to_string();
+                    if !a.is_empty() && !k.is_empty() { loaded.push((a, k)); }
+                }
+            }
+            if !loaded.is_empty() { out = loaded; }
+        }
+    }
+    out
+}
+
 fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    // Custom keybinds: if customizing, capture key; else match custom or default.
+    if s.customizing.is_some() {
+        if ev.key == Key::Function(10) || ev.key == Key::Escape || (ev.key == Key::Command('q') && ev.mods.ctrl) {
+            s.customizing = None;
+            s.custom_key = None;
+            return true;
+        }
+        let key_str = match &ev.key {
+            Key::Function(n) => format!("f{}", n),
+            Key::Enter => "enter".into(),
+            Key::Backspace => "backspace".into(),
+            Key::Delete => "delete".into(),
+            Key::Escape => "escape".into(),
+            Key::Command(c) => {
+                let mut parts = vec!["cmd".to_string()];
+                if ev.mods.ctrl { parts.push("ctrl".into()); }
+                if ev.mods.alt { parts.push("alt".into()); }
+                if ev.mods.shift { parts.push("shift".into()); }
+                parts.push(c.clone().to_string());
+                parts.join("+")
+            }
+            Key::Text(c) => c.clone().to_string(),
+            _ => { if let Key::Command(c) = ev.key { c.to_string() } else { return true; } }
+        };
+        if !key_str.is_empty() && key_str != "f10" && key_str != "escape" {
+            if let Some(i) = s.customizing {
+                if i < s.keybinds.len() {
+                    s.keybinds[i].1 = key_str;
+                    save_keybinds(s);
+                }
+            }
+        }
+        s.customizing = None;
+        s.custom_key = None;
+        return true;
+    }
+    if let Some(action) = key_is_bound(s, ev) {
+        return handle_action(s, &action);
+    }
+    // Shortcuts overlay default.
+    if ev.key == Key::Function(1) { s.show_shortcuts = !s.show_shortcuts; return true; }
     // Ctrl+Z (Cmd+Z on macOS) restores the last trashed selection. It has to be claimed
     // before the focused filter field turns it into a text undo.
-    if ev.is_command('z') {
+    if ev.key == Key::Command('z') && ev.mods.ctrl {
         undo_delete(s);
         return true;
     }
     // Ctrl+H toggles hidden files.
-    if ev.is_command('h') {
+    if ev.key == Key::Command('h') && ev.mods.ctrl {
         s.show_hidden = !s.show_hidden;
         refilter(s);
         save_settings(s);
         s.status = if s.show_hidden { "showing hidden files".into() } else { "hidden files hidden".into() };
         return true;
     }
-    if ev.is_command('/') || ev.key == Key::Function(1) {
+    if ev_is_command(ev, '/') || ev.key == Key::Function(1) {
         s.show_shortcuts = !s.show_shortcuts;
-        return true;
-    }
-    // Ctrl+C / Ctrl+X: copy/cut selected entries.
-    if ev.is_command('c') || ev.is_command('x') {
-        let cut = ev.is_command('x');
-        let mut paths = Vec::new();
-        for &idx in &s.selected {
-            if let Some(entry) = s.snapshot.entries.get(idx) {
-                if let Some(p) = entry_path(&s.location, entry) {
-                    paths.push(p);
-                }
-            }
-        }
-        if paths.is_empty() {
-            if let Some(&idx) = s.filtered.get(s.cursor) {
-                if let Some(entry) = s.snapshot.entries.get(idx) {
-                    if let Some(p) = entry_path(&s.location, entry) {
-                        paths.push(p);
-                    }
-                }
-            }
-        }
-        if !paths.is_empty() {
-            s.clipboard = paths.clone();
-            s.clipboard_cut = cut;
-            let paths2 = paths.clone();
-            std::thread::spawn(move || {
-                if let Ok(mut cb) = arboard::Clipboard::new() {
-                    let _ = cb.set().file_list(&paths2);
-                }
-            });
-            s.status = format!("{} {} item(s)", if cut { "cut" } else { "copied" }, paths.len());
-        }
-        return true;
-    }
-    // Ctrl+V: paste.
-    if ev.is_command('v') {
-        do_paste(s);
-        return true;
-    }
-    // Ctrl+Shift+N: new folder.
-    if ev.is_command('n') && ev.mods.shift {
-        if let Location::Folder(root) = s.location.clone() {
-            let handle = s.handle.clone();
-            s.status = "creating folder...".into();
-            std::thread::spawn(move || {
-                let mut name = "New folder".to_string();
-                let mut dest = root.join(&name);
-                let mut i = 2;
-                while dest.exists() {
-                    name = format!("New folder ({})", i);
-                    dest = root.join(&name);
-                    i += 1;
-                }
-                let _ = std::fs::create_dir(&dest);
-                handle.update(move |s, _| {
-                    s.status = format!("created {}", name);
-                    reload(s);
-                });
-            });
-        }
         return true;
     }
     // F3 cycles sort field, F4 toggles direction, F5 toggles folders-first.
@@ -1358,93 +1792,11 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         s.status = if s.folders_first { "folders first".into() } else { "folders mixed".into() };
         return true;
     }
-    // Ctrl+1/2/3 view modes.
-    if ev.is_command('1') { s.view_mode = 0; save_settings(s); s.status = "view: details".into(); return true; }
-    if ev.is_command('2') { s.view_mode = 1; save_settings(s); s.status = "view: list".into(); return true; }
-    if ev.is_command('3') {
-        s.view_mode = 2;
-        save_settings(s);
-        s.status = "view: grid".into();
-        load_thumbnails(s);
-        return true;
-    }
     // Ctrl+P preview pane.
-    if ev.is_command('p') { s.preview_open = !s.preview_open; return true; }
-    // Ctrl+F search within folder.
-    if ev.is_command('f') {
-        s.search_mode = !s.search_mode;
-        if s.search_mode { s.status = "search (esc to exit)".into(); }
-        return true;
-    }
-    // F2 rename (placeholder: sets status; full inline edit deferred).
-    if ev.key == Key::Function(2) {
-        if let Some(&idx) = s.filtered.get(s.cursor) {
-            if let Some(entry) = s.snapshot.entries.get(idx) {
-                s.renaming = Some(idx);
-                s.rename_text = TextEdit::new(&entry.name);
-            }
-        }
-        return true;
-    }
-    // Ctrl+I properties.
-    if ev.is_command('i') {
-        if let Some(&idx) = s.filtered.get(s.cursor) {
-            if let Some(entry) = s.snapshot.entries.get(idx) {
-                if let Some(p) = entry_path(&s.location, entry) {
-                    s.properties_path = Some(p);
-                    s.properties_size = None;
-                    s.properties_loading = true;
-                    s.properties_checksum = None;
-                    let path = s.properties_path.clone().unwrap();
-                    let handle = s.handle.clone();
-                    std::thread::spawn(move || {
-                        let size = if path.is_dir() { dir_size(&path) } else { path.metadata().map(|m| m.len()).unwrap_or(0) };
-                        let checksum = if path.is_file() { file_checksum(&path) } else { None };
-                        handle.update(move |s, _| {
-                            s.properties_size = Some(size);
-                            s.properties_checksum = checksum;
-                            s.properties_loading = false;
-                        });
-                    });
-                }
-            }
-        }
-        return true;
-    }
-    // Tabs.
-    if ev.is_command('t') {
-        s.tabs.push(s.location.clone());
-        s.active_tab = s.tabs.len() - 1;
-        save_tabs(s);
-        s.status = format!("tab {}", s.active_tab + 1);
-        return true;
-    }
-    if ev.is_command('w') {
-        if s.tabs.len() > 1 {
-            s.tabs.remove(s.active_tab);
-            if s.active_tab >= s.tabs.len() { s.active_tab = s.tabs.len() - 1; }
-            save_tabs(s);
-            let target = s.tabs[s.active_tab].clone();
-            navigate(s, target);
-            sync_address(s);
-        }
-        return true;
-    }
-    // Ctrl+Tab next tab (approx via command tab not standard; use F6).
-    if ev.key == Key::Function(6) {
-        if !s.tabs.is_empty() {
-            s.active_tab = (s.active_tab + 1) % s.tabs.len();
-            let target = s.tabs[s.active_tab].clone();
-            navigate(s, target);
-            sync_address(s);
-        }
-        return true;
-    }
-    // Ctrl+R (Cmd+R) re-measures the disk.
-    if ev.is_command('r') {
-        if let Some(path) = storage_cache_path() {
-            let _ = std::fs::remove_file(path);
-        }
+    if ev_is_command(ev, 'p') { s.preview_open = !s.preview_open; return true; }
+    // Ctrl+R re-measures disk.
+    if ev_is_command(ev, 'r') {
+        if let Some(path) = storage_cache_path() { let _ = std::fs::remove_file(path); }
         s.storage_bytes = [0; KIND_COUNT];
         s.storage_capacity = 0;
         s.storage_used = 0;
@@ -1503,15 +1855,20 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                     }
                 } else if let Some(path) = entry_path(&s.location, &s.snapshot.entries[index]) {
                     if is_archive(&path) {
-                        // extract-on-navigate: extract to sibling folder, then enter it
-                        let dest = path.with_extension("");
-                        let dest = if dest == path { path.with_file_name(format!("{}.extracted", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())) } else { dest };
+                        // shortcut: cache-backed extraction, not libarchive virtual FS; upgrade if no-extract reads are needed.
+                        let stem = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "archive".into());
+                        let target = platform::cache_dir().join("clove").join("archives").join(stem);
+                        if target.is_dir() {
+                            navigate(s, Location::Folder(target));
+                            sync_address(s);
+                            return true;
+                        }
                         let handle = s.handle.clone();
                         let src = path.clone();
-                        let target = dest.clone();
+                        let dest = target.clone();
                         s.status = "extracting...".into();
                         std::thread::spawn(move || {
-                            let ok = extract_archive(&src, &target);
+                            let ok = extract_archive(&src, &dest);
                             handle.update(move |s, _| {
                                 if ok {
                                     navigate(s, Location::Folder(target));
@@ -1939,6 +2296,7 @@ fn row_el(s: &State, index: usize) -> El {
         r = r.child(
             text_input(&s.rename_text, type_::BODY)
                 .key(format!("rename-{index}"))
+                .label("Rename")
                 .single_line()
                 .grow(1.0)
                 .color(ink())
@@ -1966,6 +2324,18 @@ fn row_el(s: &State, index: usize) -> El {
         .font(type_::LABEL)
         .color(ink_secondary()),
     );
+    let drag_paths: Vec<PathBuf> = if selected {
+        s.selected.iter().filter_map(|&i| s.snapshot.entries.get(i).and_then(|e| entry_path(&s.location, e))).collect()
+    } else {
+        entry_path(&s.location, entry).into_iter().collect()
+    };
+    if !drag_paths.is_empty() {
+        r = r.drag_out(move |_: &State| {
+            let mut item = DragItem::new();
+            for p in &drag_paths { item = item.file(p.clone()); }
+            Some(item)
+        });
+    }
     let idx2 = index;
     r = r.on_secondary_press(move |s: &mut State, _, _| {
         s.context_menu = Some(idx2);
@@ -2121,6 +2491,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         .h_full()
         .fill(bg())
         .gap(8.0)
+        .on_drop_files(|s: &mut State, _f, _| { s.drop_hover = false; })
         .child(sidebar_el(s))
         .child(
             col()
@@ -2166,6 +2537,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .child(
                     el()
                         .key("btn-back")
+                        .label("Back")
                         .w(28.0).h(28.0)
                         .radius(tokens::RADIUS_CONTROL)
                         .fill(surface())
@@ -2176,6 +2548,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .child(
                     el()
                         .key("btn-fwd")
+                        .label("Forward")
                         .w(28.0).h(28.0)
                         .radius(tokens::RADIUS_CONTROL)
                         .fill(surface())
@@ -2186,6 +2559,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .child(
                     el()
                         .key("btn-up")
+                        .label("Up one folder")
                         .w(28.0).h(28.0)
                         .radius(tokens::RADIUS_CONTROL)
                         .fill(surface())
@@ -2240,7 +2614,11 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 })
                 .child(
                     text(if let Some(op) = &s.op_progress {
-                        format!("{} {}/{} · {} failed", op.label, op.done, op.total, op.failures)
+                        if op.total == 0 {
+                            format!("{} {} · {} failed", op.label, op.done, op.failures)
+                        } else {
+                            format!("{} {}/{} · {} failed", op.label, op.done, op.total, op.failures)
+                        }
                     } else if !s.status.is_empty() {
                         s.status.clone()
                     } else if count == total {
@@ -2253,7 +2631,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                     .color(ink_secondary()),
                 )
                 .child(if s.op_progress.is_some() {
-                    el().key("op-cancel-btn").w(60.0).h(18.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
+                    el().key("op-cancel-btn").label("Cancel operation").w(60.0).h(18.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
                         .child(text("Cancel").font(type_::LABEL).color(ink()))
                         .on_press(|s: &mut State| { s.op_cancel.store(true, std::sync::atomic::Ordering::Relaxed); })
                 } else {
@@ -2349,6 +2727,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .scroll(ScrollSpec { stick_bottom: false })
                 .grow(1.0)
                 .min_h(0.0)
+                .fill(if s.drop_hover { selection() } else { Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 } })
+                .on_drop_hover(|s: &mut State, over, _| { s.drop_hover = over; })
+                .on_drop_files(handle_drop_files)
                 .child(if s.search_mode {
                     let mut col = col().key("search-results").w_full().gap(2.0);
                     for (i, p) in s.search_results.iter().take(200).enumerate() {
@@ -2485,6 +2866,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                         .child(text(format!("Properties: {}", name)).font(type_::TITLE).color(ink()))
                         .child(text(format!("Location: {}", path.display())).font(type_::LABEL).color(ink_secondary()))
                         .child(text(format!("Type: {}", if path.is_dir() { "Folder" } else { "File" })).font(type_::LABEL).color(ink_secondary()))
+                        .child(text(format!("MIME: {}", s.properties_mime.clone().unwrap_or_else(|| if loading { "detecting...".to_string() } else { "unknown".to_string() }))).font(type_::LABEL).color(ink_secondary()))
                         .child(text(format!("Permissions: {}", props_permissions(&path))).font(type_::LABEL).color(ink_secondary()))
                         .child(text(format!("Owner: {}", props_owner(&path))).font(type_::LABEL).color(ink_secondary()))
                         .child(text(if loading {
@@ -2496,14 +2878,38 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                         }).font(type_::LABEL).color(ink_secondary()))
                         .child(text(format!("Checksum: {}", s.properties_checksum.clone().unwrap_or_else(|| if loading { "calculating...".to_string() } else { "n/a".to_string() }))).font(type_::LABEL).color(ink_secondary()))
                         .child(
-                            el()
-                                .key("props-close")
-                                .w(80.0).h(28.0)
-                                .radius(tokens::RADIUS_CONTROL)
-                                .fill(bg())
-                                .center()
-                                .child(text("Close").font(type_::BODY).color(ink()))
-                                .on_press(|s: &mut State| { s.properties_path = None; }),
+                            row().gap(8.0)
+                                .child(
+                                    el()
+                                        .key("props-close")
+                                        .label("Close properties")
+                                        .w(80.0).h(28.0)
+                                        .radius(tokens::RADIUS_CONTROL)
+                                        .fill(bg())
+                                        .center()
+                                        .child(text("Close").font(type_::BODY).color(ink()))
+                                        .on_press(|s: &mut State| {
+                                            s.properties_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                            s.properties_path = None;
+                                        }),
+                                )
+                                .child(if loading {
+                                    el()
+                                        .key("props-cancel")
+                                        .label("Cancel properties")
+                                        .w(80.0).h(28.0)
+                                        .radius(tokens::RADIUS_CONTROL)
+                                        .fill(bg())
+                                        .center()
+                                        .child(text("Cancel").font(type_::BODY).color(ink()))
+                                        .on_press(|s: &mut State| {
+                                            s.properties_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                            s.properties_loading = false;
+                                            s.status = "properties: cancelled".into();
+                                        })
+                                } else {
+                                    el().key("props-cancel-off").w(0.0).h(0.0)
+                                }),
                         ),
                 )
         } else {
@@ -2554,11 +2960,17 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
             col().key("shortcuts-overlay").w_full().h_full().center().child(
                 col().key("shortcuts-card").w(520.0).padding(16.0).gap(6.0).radius(tokens::RADIUS_BAR).fill(surface())
                     .child(text("Keyboard Shortcuts").font(type_::TITLE).color(ink()))
-                    .child(text("Ctrl+C/X/V copy/cut/paste · Ctrl+Z undo · Del trash · Shift+Del permanent").font(type_::BODY).color(ink_secondary()))
-                    .child(text("F2 rename · Ctrl+Shift+N new folder · Ctrl+T/W tab · F6 next tab").font(type_::BODY).color(ink_secondary()))
-                    .child(text("Ctrl+F search · Ctrl+H hidden · Ctrl+I properties · Ctrl+/ shortcuts").font(type_::BODY).color(ink_secondary()))
-                    .child(text("Enter open/extract · Backspace up · Tab complete address").font(type_::BODY).color(ink_secondary()))
-                    .child(el().key("sc-close").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
+                    .child(col().gap(2.0).children({
+                        let help = keybinds_help();
+                        s.keybinds.iter().map(|(action, kb)| {
+                            let desc = help.iter().find(|(a, _, _)| a == action).map(|(_, _, d)| *d).unwrap_or("");
+                            row().gap(8.0)
+                                .child(text(kb.clone()).font(type_::LABEL).color(ink()).w(120.0))
+                                .child(text(desc.to_string()).font(type_::LABEL).color(ink_secondary()))
+                        }).collect::<Vec<_>>()
+                    }))
+                    .child(text("Customize: ~/.config/clove/keybinds.txt").font(type_::LABEL).color(ink_secondary()))
+                    .child(el().key("sc-close").label("Close shortcuts").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
                         .child(text("Close").font(type_::BODY).color(ink()))
                         .on_press(|s: &mut State| { s.show_shortcuts = false; }))
             )
@@ -2847,15 +3259,20 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                                 let name = paths.first().and_then(|p| p.file_name()).map(|n| format!("{}.tar.gz", n.to_string_lossy())).unwrap_or_else(|| "archive.tar.gz".into());
                                 let dest = target.join(name);
                                 let handle = s.handle.clone();
-                                s.op_progress = Some(FileOpProgress { label: "Compressing".into(), done: 0, total: 1, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
+                                s.op_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+                                let cancel = s.op_cancel.clone();
+                                let total = paths.iter().map(|p| count_files(p)).sum::<usize>().max(1);
+                                s.op_progress = Some(FileOpProgress { label: "Compressing".into(), done: 0, total, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
                                 std::thread::spawn(move || {
-                                    let mut args = vec!["czf".to_string(), dest.to_string_lossy().to_string()];
+                                    let mut args = vec!["czvf".to_string(), dest.to_string_lossy().to_string()];
                                     for p in &paths { args.push(p.to_string_lossy().to_string()); }
-                                    let res = std::process::Command::new("tar").args(&args).status();
-                                    let ok = res.map(|r| r.success()).unwrap_or(false);
+                                    let mut cmd = std::process::Command::new("tar");
+                                    cmd.args(&args);
+                                    let ok = run_progress(&mut cmd, &cancel, &handle);
+                                    let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
                                     handle.update(move |s, _| {
                                         s.op_progress = None;
-                                        s.status = if ok { "compressed".into() } else { "compress failed".into() };
+                                        s.status = if cancelled { "compress cancelled".into() } else if ok { "compressed".into() } else { "compress failed".into() };
                                         reload(s);
                                     });
                                 });
@@ -2871,17 +3288,25 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                                         let target = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
                                         let handle = s.handle.clone();
                                         let p = path.clone();
-                                        s.op_progress = Some(FileOpProgress { label: "Extracting".into(), done: 0, total: 1, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
+                                        s.op_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+                                        let cancel = s.op_cancel.clone();
+                                        let total = archive_entry_count(&p);
+                                        s.op_progress = Some(FileOpProgress { label: "Extracting".into(), done: 0, total, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
                                         std::thread::spawn(move || {
-                                            let res = if p.to_string_lossy().ends_with(".zip") {
-                                                std::process::Command::new("unzip").args(["-o", &p.to_string_lossy(), "-d", &target.to_string_lossy()]).status()
+                                            let mut cmd = if p.to_string_lossy().ends_with(".zip") {
+                                                let mut c = std::process::Command::new("unzip");
+                                                c.args(["-o", &p.to_string_lossy(), "-d", &target.to_string_lossy()]);
+                                                c
                                             } else {
-                                                std::process::Command::new("tar").args(["xf", &p.to_string_lossy(), "-C", &target.to_string_lossy()]).status()
+                                                let mut c = std::process::Command::new("tar");
+                                                c.args(["xvf", &p.to_string_lossy(), "-C", &target.to_string_lossy()]);
+                                                c
                                             };
-                                            let ok = res.map(|r| r.success()).unwrap_or(false);
+                                            let ok = run_progress(&mut cmd, &cancel, &handle);
+                                            let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
                                             handle.update(move |s, _| {
                                                 s.op_progress = None;
-                                                s.status = if ok { "extracted".into() } else { "extract failed".into() };
+                                                s.status = if cancelled { "extract cancelled".into() } else if ok { "extracted".into() } else { "extract failed".into() };
                                                 reload(s);
                                             });
                                         });
@@ -2969,25 +3394,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                             s.context_menu = None;
                         }))
                         .child(ctx_item("Properties", move |s: &mut State| {
-                            if let Some(e) = s.snapshot.entries.get(idx) {
-                                if let Some(p) = entry_path(&s.location, e) {
-                                    s.properties_path = Some(p.clone());
-                                    s.properties_size = None;
-                                    s.properties_loading = true;
-                                    s.properties_checksum = None;
-                                    let path = p;
-                                    let handle = s.handle.clone();
-                                    std::thread::spawn(move || {
-                                        let size = if path.is_dir() { dir_size(&path) } else { path.metadata().map(|m| m.len()).unwrap_or(0) };
-                                        let checksum = if path.is_file() { file_checksum(&path) } else { None };
-                                        handle.update(move |s, _| {
-                                            s.properties_size = Some(size);
-                                            s.properties_checksum = checksum;
-                                            s.properties_loading = false;
-                                        });
-                                    });
-                                }
-                            }
+                            open_properties(s);
                             s.context_menu = None;
                         }))
                         .child(ctx_item("Toggle Conflict Policy", move |s: &mut State| {
@@ -3241,9 +3648,12 @@ fn build_state(handle: AppHandle<State>) -> State {
         properties_size: None,
         properties_loading: false,
         properties_checksum: None,
+        properties_mime: None,
+        properties_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         renaming: None,
         rename_text: TextEdit::new(""),
         context_menu: None,
+        drop_hover: false,
         conflict_policy: 0,
         pending_paste: None,
         batch_rename_open: false,
@@ -3262,6 +3672,9 @@ fn build_state(handle: AppHandle<State>) -> State {
         active_tab: 0,
         show_hidden,
         show_shortcuts: false,
+        keybinds: load_keybinds(),
+        customizing: None,
+        custom_key: None,
         status: String::new(),
         loading: false,
         undo_stack: Vec::new(),
@@ -3354,6 +3767,28 @@ mod tests {
         let dups = find_duplicates(&root);
         assert_eq!(dups.len(), 1);
         assert_eq!(dups[0].1.len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use std::fs;
+
+    #[test]
+    #[ignore = "100k-file smoke; run manually with --ignored"]
+    fn perf_100k_listing() {
+        let root = std::env::temp_dir().join("clove_perf_100k");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for i in 0..100_000 {
+            fs::write(root.join(format!("f{i:06}")), b"").unwrap();
+        }
+        let start = std::time::Instant::now();
+        let n = fs::read_dir(&root).unwrap().count();
+        let elapsed = start.elapsed();
+        assert_eq!(n, 100_000);
+        println!("100k listing: {elapsed:?}");
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -33,11 +33,11 @@ people expect from a daily file manager. Do not lose the no-index, fast-listing 
 
 ## Phase FM3 — Content and metadata (1–2 weeks)  [partial]
 
-- [x] Thumbnail cache: images+svg in-memory with 64MB byte-cap eviction. No video/PDF (needs ffmpeg/poppler deps).
-- [x] Archive extract-on-navigate (tar/zip/7z/rar via system tools). Virtual browsing deferred.
+- [x] Thumbnail cache: images+svg+video+PDF (ffmpeg/pdftoppm when present) with 64MB byte-cap eviction.
+- [x] Archive browse: cache-backed extract-on-navigate (tar/zip/7z/rar via system tools). True libarchive virtual browsing deferred (shortcut comment in code).
 - [x] Git badge: branch + dirty icon in header.
 - [x] Extended properties: perms, owner (uid), size, SHA256 checksum.
-- [~] Folder sizes on demand: properties computes dir size in background. No cancel/progress UI yet.
+- [x] Folder sizes on demand: properties computes dir size in background, cancellable, with progress status.
 
 ## Phase FM4 — Power features (1–2 weeks)  [mostly complete]
 
@@ -45,16 +45,16 @@ people expect from a daily file manager. Do not lose the no-index, fast-listing 
 - [x] Compare folders (select 2 dirs, name+size diff).
 - [x] Bulk checksum copy/verify report (SHA256, clipboard).
 - [x] Symlink/hardlink creation.
-- [x] Compress/extract actions with progress status.
+- [x] Compress/extract with verbose file-count progress and cancel (kills child process).
 - [x] Duplicate finder (size+SHA256, current folder tree).
 
 ## Phase FM5 — Quality and platform (ongoing)  [partial]
 
-- [ ] Drag and drop internal/external (Rune/framework support not wired; deferred).
-- [x] Keyboard shortcut audit overlay (Ctrl+/ or F1). File-based customization not implemented.
-- [~] Accessibility: labels/placeholders on inputs; full AT-SPI pass deferred.
-- [~] Performance: virtualized listing already used; thumbnail 64MB cap added; no 100k benchmark run.
-- [~] Cross-platform regression tests: helper unit tests added (checksum/compare/dupes); trash/open/mount integration tests still limited.
+- [x] External file drop; drag-out from list rows; internal drop copies. Grid drag-out deferred.
+- [x] Keyboard shortcut overlay shows live bindings; customize via `~/.config/clove/keybinds.txt`.
+- [~] Accessibility: labels on toolbar, inputs, and modals; full AT-SPI tree audit still partial.
+- [x] Performance: virtualized listing, 64MB thumbnail cap, ignored 100k-file smoke test (`cargo test -p clove-ui -- --ignored perf_100k_listing`).
+- [x] Regression tests: checksum/compare/dupes helpers; platform mounts/dirs/trash-safety tests added.
 
 ## Architecture notes
 
