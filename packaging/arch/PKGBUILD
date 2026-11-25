@@ -6,7 +6,7 @@
 # dependencies for Rune and its patched vendor crates.
 
 pkgname=clove-linux
-pkgver=1.6.1
+pkgver=1.6.2
 pkgrel=1
 pkgdesc="Fast dithered-storage file manager"
 arch=('x86_64')

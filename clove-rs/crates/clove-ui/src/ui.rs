@@ -1161,10 +1161,6 @@ fn empty_state_el(s: &State) -> El {
 // ---------------------------------------------------------------- minimal animated Bayer storage dock
 
 fn storage_dock_el(s: &State) -> El {
-    if !s.storage_bar_open {
-        return el().key("storage-off").w_full().h(0.0);
-    }
-
     let capacity = s.storage_capacity;
     let used = s.storage_used;
     let pct = if capacity > 0 {
@@ -1185,106 +1181,11 @@ fn storage_dock_el(s: &State) -> El {
         .key("storage-dock")
         .w_full()
         .px(18.0)
-        .pt(4.0)
-        .pb(12.0)
-        .gap(6.0);
+        .pt(6.0)
+        .pb(14.0)
+        .gap(8.0);
 
-    // Optional expanded 9-kind breakdown card right above the thin bar
-    if s.storage_expanded {
-        let mut legend = row().w_full().flex_wrap().gaps(8.0, 14.0);
-        for k in 0..KIND_COUNT {
-            let bytes = s.storage_bytes[k];
-            let has_kind = bytes > 0 && s.storage_has_data;
-            let text_str = if has_kind {
-                format!("{} · {}", tokens::STORAGE_KIND_NAMES[k], human_gb(bytes))
-            } else {
-                tokens::STORAGE_KIND_NAMES[k].to_string()
-            };
-            legend = legend.child(
-                row()
-                    .key(format!("leg-{k}"))
-                    .gap(6.0)
-                    .center_y()
-                    .child(
-                        el().size(8.0, 8.0)
-                            .radius(999.0)
-                            .fill(color_rgb(
-                                tokens::STORAGE_KIND_RGB[k],
-                                if has_kind { 1.0 } else { 0.35 },
-                            )),
-                    )
-                    .child(
-                        text(text_str)
-                            .font(ts(12.0, 400.0))
-                            .color(if has_kind { ink_secondary() } else { ink_muted() }),
-                    ),
-            );
-        }
-
-        dock = dock.child(
-            col()
-                .key("storage-expanded-card")
-                .w_full()
-                .padding(12.0)
-                .gap(10.0)
-                .radius(tokens::RADIUS_CARD)
-                .fill(popover_bg())
-                .border(1.0, hairline())
-                .child(
-                    row()
-                        .w_full()
-                        .center_y()
-                        .gap(8.0)
-                        .child(text("Disk Breakdown").font(ts(13.0, 600.0)).color(ink()))
-                        .child(text(summary.clone()).font(ts(12.0, 400.0)).color(ink_muted()))
-                        .child(spacer())
-                        .child(
-                            row()
-                                .key("btn-bar-rescan")
-                                .px(8.0)
-                                .h(24.0)
-                                .gap(5.0)
-                                .radius(6.0)
-                                .fill(hover_fill())
-                                .hover(white_a(0.08))
-                                .center()
-                                .child(rune::icon(ICON_REFRESH, 12.0).color(ink_secondary()))
-                                .child(text("Rescan").font(ts(11.5, 500.0)).color(ink_secondary()))
-                                .on_press(|st: &mut State| {
-                                    if let Some(p) = storage_cache_path() {
-                                        let _ = std::fs::remove_file(p);
-                                    }
-                                    st.storage_bytes = [0; KIND_COUNT];
-                                    st.storage_capacity = 0;
-                                    st.storage_used = 0;
-                                    st.storage_ready = false;
-                                    st.storage_has_data = false;
-                                    st.scan = None;
-                                    st.scan_started = false;
-                                    st.wake_bar();
-                                    rebuild_bar(st);
-                                }),
-                        )
-                        .child(
-                            el().key("btn-bar-hide")
-                                .px(8.0)
-                                .h(24.0)
-                                .radius(6.0)
-                                .fill(hover_fill())
-                                .hover(white_a(0.08))
-                                .center()
-                                .child(text("Hide").font(ts(11.5, 500.0)).color(ink_secondary()))
-                                .on_press(|st: &mut State| {
-                                    st.storage_bar_open = false;
-                                    st.storage_expanded = false;
-                                }),
-                        ),
-                )
-                .child(legend),
-        );
-    }
-
-    // Minimal always-neat dithered footer strip
+    // Header strip above the bar
     dock = dock
         .child(
             row()
@@ -1292,19 +1193,54 @@ fn storage_dock_el(s: &State) -> El {
                 .w_full()
                 .center_y()
                 .gap(8.0)
-                .child(text("Storage").font(ts(11.5, 600.0)).color(ink_secondary()))
-                .child(text(summary).font(ts(11.5, 400.0)).color(ink_muted()))
+                .child(text("Storage").font(ts(12.0, 600.0)).color(ink_secondary()))
+                .child(text(summary).font(ts(12.0, 400.0)).color(ink_muted()))
                 .child(spacer())
                 .child(
-                    text(if s.storage_expanded { "Hide details ▾" } else { "Details ▴" })
-                        .font(ts(11.5, 500.0))
-                        .color(ink_muted()),
+                    el().key("btn-bar-rescan")
+                        .label("Rescan storage")
+                        .size(24.0, 22.0)
+                        .radius(6.0)
+                        .hover(hover_fill())
+                        .press(press_fill())
+                        .center()
+                        .child(rune::icon(ICON_REFRESH, 12.0).color(ink_muted()))
+                        .on_press(|st: &mut State| {
+                            close_popovers(st);
+                            if let Some(p) = storage_cache_path() {
+                                let _ = std::fs::remove_file(p);
+                            }
+                            st.storage_bytes = [0; KIND_COUNT];
+                            st.storage_capacity = 0;
+                            st.storage_used = 0;
+                            st.storage_ready = false;
+                            st.storage_has_data = false;
+                            st.scan = None;
+                            st.scan_started = false;
+                            st.wake_bar();
+                            rebuild_bar(st);
+                        }),
                 )
-                .on_press(|st: &mut State| {
-                    close_popovers(st);
-                    st.storage_expanded = !st.storage_expanded;
-                }),
+                .child(
+                    el().key("btn-bar-details")
+                        .px(6.0)
+                        .h(22.0)
+                        .radius(6.0)
+                        .hover(hover_fill())
+                        .press(press_fill())
+                        .center()
+                        .child(
+                            text(if s.storage_expanded { "Details ▴" } else { "Details ▾" })
+                                .font(ts(12.0, 500.0))
+                                .color(ink_muted()),
+                        )
+                        .on_press(|st: &mut State| {
+                            close_popovers(st);
+                            st.storage_expanded = !st.storage_expanded;
+                        }),
+                ),
         )
+        // Bayer 4x4 animated storage bar on top ("up the disk")
         .child(
             el().key("storage-bar-canvas")
                 .w_full()
@@ -1324,6 +1260,62 @@ fn storage_dock_el(s: &State) -> El {
                     st.storage_expanded = !st.storage_expanded;
                 }),
         );
+
+    // Minimalist breakdown directly below the bar
+    if s.storage_expanded {
+        let mut legend = row()
+            .key("storage-breakdown-row")
+            .w_full()
+            .flex_wrap()
+            .gaps(6.0, 16.0)
+            .px(2.0)
+            .pt(2.0);
+        for k in 0..KIND_COUNT {
+            let bytes = s.storage_bytes[k];
+            let has_kind = bytes > 0 && s.storage_has_data;
+            let amt = if !has_kind {
+                "0 GB".to_string()
+            } else if bytes >= 100_000_000 {
+                human_gb(bytes)
+            } else {
+                format_size(bytes)
+            };
+            legend = legend.child(
+                row()
+                    .key(format!("leg-{k}"))
+                    .gap(6.0)
+                    .center_y()
+                    .child(
+                        el().size(7.0, 7.0)
+                            .radius(999.0)
+                            .fill(color_rgb(
+                                tokens::STORAGE_KIND_RGB[k],
+                                if has_kind { 1.0 } else { 0.30 },
+                            )),
+                    )
+                    .child(
+                        text(format!("{} {}", tokens::STORAGE_KIND_NAMES[k], amt))
+                            .font(ts(12.0, 400.0))
+                            .color(if has_kind { ink_secondary() } else { ink_muted() }),
+                    ),
+            );
+        }
+        if capacity > used {
+            legend = legend.child(
+                row()
+                    .key("leg-free")
+                    .gap(6.0)
+                    .center_y()
+                    .child(el().size(7.0, 7.0).radius(999.0).fill(white_a(0.18)))
+                    .child(
+                        text(format!("Free {}", human_gb(capacity - used)))
+                            .font(ts(12.0, 400.0))
+                            .color(ink_muted()),
+                    ),
+            );
+        }
+        dock = dock.child(legend);
+    }
 
     dock
 }
@@ -1424,16 +1416,6 @@ fn main_menu_popover(s: &State) -> El {
                 close_popovers(st);
             },
         ))
-        .child(menu_row(
-            "mm-storage",
-            "Show Storage Bar",
-            "",
-            Some(s.storage_bar_open),
-            |st| {
-                st.storage_bar_open = !st.storage_bar_open;
-                close_popovers(st);
-            },
-        ))
         .child(menu_separator("mm-sep2"))
         .child(menu_row("mm-shortcuts", "Keyboard Shortcuts", "Ctrl+/", None, |st| {
             close_popovers(st);
@@ -1501,9 +1483,6 @@ fn view_menu_popover(s: &State) -> El {
         .child(menu_separator("vm-sep2"))
         .child(menu_row("vm-hidden", "Show Hidden Files", "Ctrl+H", Some(s.show_hidden), |st| {
             st.show_hidden = !st.show_hidden; refilter(st); save_settings(st); close_popovers(st);
-        }))
-        .child(menu_row("vm-storage", "Show Storage Bar", "", Some(s.storage_bar_open), |st| {
-            st.storage_bar_open = !st.storage_bar_open; close_popovers(st);
         }))
 }
 

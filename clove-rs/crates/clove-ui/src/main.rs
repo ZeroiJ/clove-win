@@ -43,7 +43,7 @@ fn srgb_to_linear(c: f32) -> f32 {
 }
 
 const ROW_H: f32 = 28.0;
-const BAR_H: f32 = 16.0;
+const BAR_H: f32 = 44.0;
 
 // ---------------------------------------------------------------- state
 
@@ -183,7 +183,6 @@ struct State {
     keybinds: Vec<(String, String)>,
     customizing: Option<usize>,
     custom_key: Option<String>,
-    storage_bar_open: bool,
     storage_expanded: bool,
     win_width: f32,
     icon_size: f32,
@@ -2682,7 +2681,6 @@ fn build_state(handle: AppHandle<State>) -> State {
         storage_has_data,
         bar_width: 936.0,
         ui_scale: 2.0,
-        storage_bar_open: true,
         storage_expanded: false,
         win_width: 1180.0,
         icon_size: 96.0,
@@ -2701,6 +2699,9 @@ fn main() {
     let app = App::new(AppSpec {
         poll: Some(poll),
         on_key: Some(handle_key),
+        scenes: &[("expanded", |s: &mut State| {
+            s.storage_expanded = true;
+        })],
         families: ("Adwaita Sans, Inter, sans-serif", "Adwaita Mono, monospace"),
         ..AppSpec::new("Clove", (1180.0, 740.0), || unreachable!(), ui::view)
     })

@@ -1,9 +1,21 @@
 name: Publish AUR
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version or tag (e.g. v1.6.2 or 1.6.2); defaults to PKGBUILD pkgver"
+        required: false
+        type: string
+    secrets:
+      AUR_SSH_PRIVATE_KEY:
+        required: true
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version or tag (e.g. v1.6.2 or 1.6.2); defaults to PKGBUILD pkgver"
+        required: false
+        type: string
 
 jobs:
   aur:
@@ -16,18 +28,28 @@ jobs:
       - name: Install dependencies
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm --needed base-devel git openssh
+          pacman -S --noconfirm --needed base-devel git openssh curl
 
-      - name: Fetch pinned Rune checkout
-        run: |
-          git clone --depth 1 https://github.com/anomalyco/rune.git prototypes/_rune-upstream
-          cd prototypes/_rune-upstream
-          git fetch --depth 1 origin db301c06ab0d68b70c4822a542fffc6615bbd419
-          git checkout db301c06ab0d68b70c4822a542fffc6615bbd419
-
-      - name: Generate .SRCINFO
+      - name: Sync PKGBUILD & generate .SRCINFO
         working-directory: packaging/aur
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
+          RAW_VER="${INPUT_VERSION#v}"
+          CURRENT_VER="$(sed -n 's/^pkgver=//p' PKGBUILD | head -n1)"
+          TARGET_VER="${RAW_VER:-$CURRENT_VER}"
+          if [ -z "$TARGET_VER" ] || ! printf '%s' "$TARGET_VER" | grep -Eq '^[0-9A-Za-z._+]+$'; then
+            echo "Invalid pkgver: '$TARGET_VER'" >&2
+            exit 1
+          fi
+
+          if [ "$TARGET_VER" != "$CURRENT_VER" ]; then
+            sed -i "s/^pkgver=.*/pkgver=${TARGET_VER}/" PKGBUILD
+            sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          fi
+
+          curl -fsSLo /dev/null "https://github.com/ZeroiJ/clove-win/archive/refs/tags/v${TARGET_VER}.tar.gz"
+
           # makepkg refuses to run as root; use an unprivileged user.
           useradd -m builder 2>/dev/null || true
           chown -R builder .
@@ -37,6 +59,10 @@ jobs:
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "AUR_SSH_PRIVATE_KEY secret is not set" >&2
+            exit 1
+          fi
           mkdir -p ~/.ssh
           printf '%s\n' "$AUR_SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
@@ -52,5 +78,11 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add PKGBUILD .SRCINFO
-          git commit -m "Update to $(grep '^pkgver=' PKGBUILD | cut -d= -f2)" || echo "nothing to commit"
+          if git diff --cached --quiet; then
+            echo "AUR package is already up to date."
+            exit 0
+          fi
+          PKGVER="$(sed -n 's/^pkgver=//p' PKGBUILD | head -n1)"
+          PKGREL="$(sed -n 's/^pkgrel=//p' PKGBUILD | head -n1)"
+          git commit -m "Update to ${PKGVER}-${PKGREL}"
           git push

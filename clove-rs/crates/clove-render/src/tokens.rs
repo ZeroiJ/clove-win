@@ -48,7 +48,7 @@ pub const RADIUS_CARD: f32 = 12.0;
 pub const RADIUS_CONTROL: f32 = 6.0;
 pub const RADIUS_ROW: f32 = 6.0;
 pub const RADIUS_PATHBAR: f32 = 9.0;
-pub const RADIUS_BAR: f32 = 6.0;
+pub const RADIUS_BAR: f32 = 8.0;
 pub const RADIUS_PILL: f32 = 999.0;
 
 /// Typography scale (size pt, weight), from `Typography.swift`.
