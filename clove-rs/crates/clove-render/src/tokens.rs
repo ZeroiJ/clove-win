@@ -23,22 +23,22 @@ impl Rgb {
     }
 }
 
-/// Palette (Vesper dark / Omarchy).
-pub const BG: Rgb = Rgb(0x10, 0x11, 0x14);
-pub const SIDEBAR_BG: Rgb = Rgb(0x15, 0x16, 0x19);
-pub const SURFACE: Rgb = Rgb(0x1E, 0x20, 0x24);
-pub const SURFACE_HOVER: Rgb = Rgb(0x27, 0x29, 0x2E);
-pub const SURFACE_ACTIVE: Rgb = Rgb(0x31, 0x33, 0x3A);
-pub const INK: Rgb = Rgb(0xFA, 0xFA, 0xFA);
-pub const INK_SECONDARY: Rgb = Rgb(0x9E, 0xA1, 0xA8);
-pub const INK_MUTED: Rgb = Rgb(0x5A, 0x5D, 0x66);
-pub const HAIRLINE: Rgb = Rgb(0x22, 0x24, 0x28);
-pub const ACCENT: Rgb = Rgb(0xFF, 0xC7, 0x99); // Vesper peach/accent
-pub const ACCENT_MUTED: Rgb = Rgb(0x3A, 0x2F, 0x24);
+/// Palette (Libadwaita Dark / Omarchy glass).
+pub const BG: Rgb = Rgb(0x1D, 0x1D, 0x20);
+pub const SIDEBAR_BG: Rgb = Rgb(0x2E, 0x2E, 0x32);
+pub const SURFACE: Rgb = Rgb(0x2E, 0x2E, 0x32);
+pub const SURFACE_HOVER: Rgb = Rgb(0x3A, 0x3A, 0x40);
+pub const SURFACE_ACTIVE: Rgb = Rgb(0x45, 0x45, 0x4C);
+pub const INK: Rgb = Rgb(0xF3, 0xF3, 0xF5);
+pub const INK_SECONDARY: Rgb = Rgb(0xB0, 0xB0, 0xB6);
+pub const INK_MUTED: Rgb = Rgb(0x78, 0x78, 0x80);
+pub const HAIRLINE: Rgb = Rgb(0x35, 0x35, 0x3C);
+pub const ACCENT: Rgb = Rgb(0x35, 0x84, 0xE4); // Adwaita blue
+pub const ACCENT_MUTED: Rgb = Rgb(0x25, 0x33, 0x46);
 pub const FOLDER_ORANGE: Rgb = Rgb(0xE9, 0x54, 0x20); // Yaru terracotta orange
-pub const SUCCESS: Rgb = Rgb(0x99, 0xFF, 0xE4); // Vesper mint
-pub const WARNING: Rgb = Rgb(0xFF, 0xC7, 0x99); // Vesper orange/yellow
-pub const DANGER: Rgb = Rgb(0xFF, 0x80, 0x80);  // Vesper red
+pub const SUCCESS: Rgb = Rgb(0x57, 0xE3, 0x89); // Adwaita green
+pub const WARNING: Rgb = Rgb(0xF8, 0xE4, 0x5C); // Adwaita yellow
+pub const DANGER: Rgb = Rgb(0xF6, 0x61, 0x51);  // Adwaita red
 
 /// Spacing scale (points), from `Metrics.swift`.
 pub const SPACING: [f32; 5] = [4.0, 8.0, 12.0, 16.0, 24.0];
@@ -47,13 +47,14 @@ pub const SPACING: [f32; 5] = [4.0, 8.0, 12.0, 16.0, 24.0];
 pub const RADIUS_CARD: f32 = 12.0;
 pub const RADIUS_CONTROL: f32 = 6.0;
 pub const RADIUS_ROW: f32 = 6.0;
-pub const RADIUS_BAR: f32 = 8.0;
+pub const RADIUS_PATHBAR: f32 = 9.0;
+pub const RADIUS_BAR: f32 = 6.0;
 pub const RADIUS_PILL: f32 = 999.0;
 
 /// Typography scale (size pt, weight), from `Typography.swift`.
-pub const TYPE_BODY: (f32, f32) = (13.0, 400.0);
+pub const TYPE_BODY: (f32, f32) = (13.5, 400.0);
 pub const TYPE_LABEL: (f32, f32) = (12.0, 500.0);
-pub const TYPE_TITLE: (f32, f32) = (17.0, 600.0);
+pub const TYPE_TITLE: (f32, f32) = (15.0, 700.0);
 
 /// `StorageKind` bar hues, dark mode, in enum order (`Clove/Storage/StorageKind.swift`).
 pub const STORAGE_KIND_RGB: [[f32; 3]; 9] = [

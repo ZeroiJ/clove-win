@@ -21,4 +21,5 @@ dist/
 # shallow clone of rune's dev branch used for prototyping (upstream code, not ours)
 /prototypes/_rune-upstream
 /prototypes/_rune-upstream/
+/inspiration/
 

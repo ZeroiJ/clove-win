@@ -18,17 +18,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rune::tok::type_;
-use rune::{
-    col, el, row, text, text_input, App, AppHandle, AppSpec, Color, Cx, DragItem, El, GrowthSpec,
-    Key, KeyEvent, Pixels, ScrollSpec, TextEdit, Tx,
-};
+use rune::{App, AppHandle, AppSpec, Key, KeyEvent, Pixels, TextEdit, Tx};
 
+mod icons;
 mod platform;
+mod ui;
 
 use clove_fs::{list_dir, DirWatcher, Entry, Snapshot};
 use clove_fs::scan::{ScanEvent, StorageKind, StorageScan, KIND_COUNT};
-use clove_render::tokens::{self, Rgb};
+
 use clove_render::{BarRenderer, BarSpec, Segment};
 
 // ---------------------------------------------------------------- palette
@@ -44,92 +42,17 @@ fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
-fn color(rgb: Rgb, a: f32) -> Color {
-    let c = rgb.to_f32();
-    Color {
-        r: srgb_to_linear(c[0]),
-        g: srgb_to_linear(c[1]),
-        b: srgb_to_linear(c[2]),
-        a,
-    }
-}
-
-fn bg() -> Color {
-    color(tokens::BG, 1.0)
-}
-fn surface() -> Color {
-    color(tokens::SURFACE, 1.0)
-}
-fn ink() -> Color {
-    color(tokens::INK, 1.0)
-}
-fn ink_secondary() -> Color {
-    color(tokens::INK_SECONDARY, 1.0)
-}
-fn ink_muted() -> Color {
-    color(tokens::INK_MUTED, 1.0)
-}
-fn hairline() -> Color {
-    color(tokens::HAIRLINE, 1.0)
-}
-fn accent() -> Color {
-    color(tokens::ACCENT, 1.0)
-}
-fn accent_muted() -> Color {
-    color(tokens::ACCENT_MUTED, 1.0)
-}
-#[allow(dead_code)]
-fn success() -> Color {
-    color(tokens::SUCCESS, 1.0)
-}
-#[allow(dead_code)]
-fn warning() -> Color {
-    color(tokens::WARNING, 1.0)
-}
-#[allow(dead_code)]
-fn danger() -> Color {
-    color(tokens::DANGER, 1.0)
-}
-fn sidebar_bg() -> Color {
-    color(tokens::SIDEBAR_BG, 1.0)
-}
-fn folder_orange() -> Color {
-    color(tokens::FOLDER_ORANGE, 1.0)
-}
-/// A subtle white wash over the surface for selection.
-fn selection() -> Color {
-    Color {
-        r: 1.0,
-        g: 1.0,
-        b: 1.0,
-        a: 0.07,
-    }
-}
-fn selection_strong() -> Color {
-    Color {
-        r: 1.0,
-        g: 1.0,
-        b: 1.0,
-        a: 0.12,
-    }
-}
-fn modal_scrim() -> Color {
-    Color {
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-        a: 0.62,
-    }
-}
-
 const ROW_H: f32 = 28.0;
-const BAR_H: f32 = 72.0;
+const BAR_H: f32 = 16.0;
 
 // ---------------------------------------------------------------- state
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Location {
     ThisPc,
+    Recent,
+    Starred,
+    Network,
     Folder(PathBuf),
 }
 
@@ -240,6 +163,7 @@ struct State {
     /// Animate the bar until this clock value; `poll` stops asking for frames after it.
     bar_until: f32,
     /// Focus the filter field on the first frames, so typing filters without a click.
+    #[allow(dead_code)]
     focus_attempts: u8,
     /// Bumped on every navigation so stale load/watch threads stop applying.
     generation: Arc<AtomicU64>,
@@ -260,6 +184,15 @@ struct State {
     customizing: Option<usize>,
     custom_key: Option<String>,
     storage_bar_open: bool,
+    storage_expanded: bool,
+    win_width: f32,
+    icon_size: f32,
+    main_menu_open: bool,
+    view_menu_open: bool,
+    path_menu_open: bool,
+    focus_target: Option<String>,
+    starred: Vec<PathBuf>,
+    virtual_paths: Vec<PathBuf>,
     system_icons: std::collections::HashMap<String, Pixels>,
 }
 
@@ -316,8 +249,8 @@ fn refilter(s: &mut State) {
             !e.hidden && !e.system
         });
     }
-    // Sort when not filtering by query (search ranking wins otherwise).
-    if s.query.text.trim().is_empty() {
+    // Sort when not filtering by query (search ranking wins otherwise; Recent stays chronological by default).
+    if s.query.text.trim().is_empty() && !(matches!(s.location, Location::Recent) && s.sort_by == 0) {
         let sort_by = s.sort_by;
         let desc = s.sort_desc;
         let folders_first = s.folders_first;
@@ -350,9 +283,129 @@ fn refilter(s: &mut State) {
 fn sync_address(s: &mut State) {
     match &s.location {
         Location::ThisPc => s.address.text = "This PC".to_string(),
+        Location::Recent => s.address.text = "Recent".to_string(),
+        Location::Starred => s.address.text = "Starred".to_string(),
+        Location::Network => s.address.text = "Network".to_string(),
         Location::Folder(p) => s.address.text = p.display().to_string(),
     }
     s.edit_address = false;
+}
+
+fn starred_path() -> PathBuf {
+    platform::config_dir().join("clove").join("starred.txt")
+}
+
+fn load_starred() -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(starred_path()) else { return Vec::new() };
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect()
+}
+
+fn save_starred(list: &[PathBuf]) {
+    let p = starred_path();
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let body: Vec<String> = list.iter().map(|x| x.to_string_lossy().to_string()).collect();
+    let _ = std::fs::write(p, body.join("\n"));
+}
+
+fn is_starred(s: &State, path: &Path) -> bool {
+    s.starred.iter().any(|p| p == path)
+}
+
+fn toggle_star(s: &mut State, path: PathBuf) {
+    if let Some(pos) = s.starred.iter().position(|p| p == &path) {
+        s.starred.remove(pos);
+        s.status = "Removed from Starred".into();
+    } else {
+        s.starred.push(path);
+        s.status = "Added to Starred".into();
+    }
+    save_starred(&s.starred);
+    if matches!(s.location, Location::Starred) {
+        reload(s);
+    }
+}
+
+fn collect_recent_in_dir(dir: &Path, depth: u8, out: &mut Vec<(std::time::SystemTime, Entry, PathBuf)>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for item in rd.flatten().take(250) {
+        let name = item.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let Ok(meta) = item.metadata() else { continue };
+        let path = item.path();
+        if meta.is_dir() {
+            if depth > 0 {
+                collect_recent_in_dir(&path, depth - 1, out);
+            }
+        } else if meta.is_file() {
+            let mod_time = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let mut e = Entry::new(name, false, meta.len());
+            e.modified = meta.modified().ok();
+            out.push((mod_time, e, path));
+        }
+    }
+}
+
+fn recent_entries() -> (Vec<Entry>, Vec<PathBuf>) {
+    let home = platform::home_dir();
+    let mut found: Vec<(std::time::SystemTime, Entry, PathBuf)> = Vec::new();
+    collect_recent_in_dir(&home, 0, &mut found);
+    for sub in ["Documents", "Downloads", "Pictures", "Videos", "Projects", "Work", "Desktop"] {
+        let dir = home.join(sub);
+        if dir.is_dir() {
+            collect_recent_in_dir(&dir, 1, &mut found);
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut entries = Vec::with_capacity(60);
+    let mut paths = Vec::with_capacity(60);
+    for (_, e, p) in found.into_iter().take(60) {
+        entries.push(e);
+        paths.push(p);
+    }
+    (entries, paths)
+}
+
+fn starred_entries(starred: &[PathBuf]) -> (Vec<Entry>, Vec<PathBuf>) {
+    let mut entries = Vec::new();
+    let mut paths = Vec::new();
+    for p in starred {
+        let Ok(meta) = std::fs::metadata(p) else { continue };
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| p.display().to_string());
+        let mut e = Entry::new(name, meta.is_dir(), meta.len());
+        e.modified = meta.modified().ok();
+        entries.push(e);
+        paths.push(p.clone());
+    }
+    (entries, paths)
+}
+
+fn network_entries() -> (Vec<Entry>, Vec<PathBuf>) {
+    let mut entries = Vec::new();
+    let mut paths = Vec::new();
+    if let Ok(xdg_rt) = std::env::var("XDG_RUNTIME_DIR") {
+        let gvfs = PathBuf::from(xdg_rt).join("gvfs");
+        if let Ok(rd) = std::fs::read_dir(gvfs) {
+            for item in rd.flatten() {
+                let p = item.path();
+                let name = item.file_name().to_string_lossy().to_string();
+                entries.push(Entry::new(name, true, 0));
+                paths.push(p);
+            }
+        }
+    }
+    (entries, paths)
 }
 
 fn rebuild_bar(s: &mut State) {
@@ -401,9 +454,9 @@ fn load_into(
         match result {
             Ok(snapshot) => {
                 s.snapshot = Arc::new(snapshot);
+                s.virtual_paths.clear();
                 s.location = Location::Folder(dir);
                 sync_address(s);
-                // tab update not available here easily; skip
                 if s.loading {
                     s.status.clear();
                 }
@@ -417,6 +470,74 @@ fn load_into(
             }
         }
     });
+}
+
+fn dispatch_location_load(s: &mut State, location: Location, watch: bool) {
+    let mine = s.generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let generation = s.generation.clone();
+    let handle = s.handle.clone();
+
+    match location {
+        Location::ThisPc => {
+            let entries = this_pc_entries();
+            handle.update(move |s, _| {
+                if generation.load(Ordering::Relaxed) != mine { return; }
+                s.virtual_paths.clear();
+                s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
+                s.loading = false;
+                s.status.clear();
+                refilter(s);
+            });
+        }
+        Location::Recent => {
+            std::thread::spawn(move || {
+                let (entries, vpaths) = recent_entries();
+                handle.update(move |s, _| {
+                    if generation.load(Ordering::Relaxed) != mine { return; }
+                    s.virtual_paths = vpaths;
+                    s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
+                    s.loading = false;
+                    s.status.clear();
+                    refilter(s);
+                });
+            });
+        }
+        Location::Starred => {
+            let starred = s.starred.clone();
+            handle.update(move |s, _| {
+                if generation.load(Ordering::Relaxed) != mine { return; }
+                let (entries, vpaths) = starred_entries(&starred);
+                s.virtual_paths = vpaths;
+                s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
+                s.loading = false;
+                s.status.clear();
+                refilter(s);
+            });
+        }
+        Location::Network => {
+            let (entries, vpaths) = network_entries();
+            handle.update(move |s, _| {
+                if generation.load(Ordering::Relaxed) != mine { return; }
+                s.virtual_paths = vpaths;
+                s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
+                s.loading = false;
+                s.status.clear();
+                refilter(s);
+            });
+        }
+        Location::Folder(dir) => {
+            std::thread::spawn(move || {
+                let watcher = if watch { DirWatcher::new(&dir).ok() } else { None };
+                load_into(&handle, &generation, mine, dir.clone());
+                let Some(watcher) = watcher else { return };
+                while generation.load(Ordering::Relaxed) == mine {
+                    if watcher.recv_timeout(Duration::from_millis(250)).is_some() {
+                        load_into(&handle, &generation, mine, dir.clone());
+                    }
+                }
+            });
+        }
+    }
 }
 
 /// Navigates to `location`: records history, swaps the snapshot, arms a watcher for folders.
@@ -434,6 +555,7 @@ fn navigate(s: &mut State, location: Location) {
     if s.active_tab < s.tabs.len() { s.tabs[s.active_tab] = s.location.clone(); }
     save_tabs(s);
     s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), Vec::new()));
+    s.virtual_paths.clear();
     s.filtered.clear();
     s.selected.clear();
     s.cursor = 0;
@@ -442,37 +564,7 @@ fn navigate(s: &mut State, location: Location) {
     s.status = "loading...".into();
     s.query.text.clear();
 
-    let mine = s.generation.fetch_add(1, Ordering::Relaxed) + 1;
-    let generation = s.generation.clone();
-    let handle = s.handle.clone();
-
-    match location {
-        Location::ThisPc => {
-            let entries = this_pc_entries();
-            handle.update(move |s, _| {
-                if generation.load(Ordering::Relaxed) != mine {
-                    return;
-                }
-                s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
-                s.loading = false;
-                s.status.clear();
-                refilter(s);
-            });
-        }
-        Location::Folder(dir) => {
-            std::thread::spawn(move || {
-                let watcher = DirWatcher::new(&dir).ok();
-                load_into(&handle, &generation, mine, dir.clone());
-
-                let Some(watcher) = watcher else { return };
-                while generation.load(Ordering::Relaxed) == mine {
-                    if watcher.recv_timeout(Duration::from_millis(250)).is_some() {
-                        load_into(&handle, &generation, mine, dir.clone());
-                    }
-                }
-            });
-        }
-    }
+    dispatch_location_load(s, location, true);
 }
 
 fn go_back(s: &mut State) {
@@ -483,32 +575,14 @@ fn go_back(s: &mut State) {
     sync_address(s);
     if !s.tabs.is_empty() && s.active_tab < s.tabs.len() { s.tabs[s.active_tab] = s.location.clone(); }
     s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), Vec::new()));
+    s.virtual_paths.clear();
     s.filtered.clear();
     s.selected.clear();
     s.cursor = 0;
     s.anchor = None;
     s.loading = true;
     s.status = "loading...".into();
-    let mine = s.generation.fetch_add(1, Ordering::Relaxed) + 1;
-    let generation = s.generation.clone();
-    let handle = s.handle.clone();
-    match target {
-        Location::ThisPc => {
-            let entries = this_pc_entries();
-            handle.update(move |s, _| {
-                if generation.load(Ordering::Relaxed) != mine { return; }
-                s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
-                s.loading = false;
-                s.status.clear();
-                refilter(s);
-            });
-        }
-        Location::Folder(dir) => {
-            std::thread::spawn(move || {
-                load_into(&handle, &generation, mine, dir);
-            });
-        }
-    }
+    dispatch_location_load(s, target, false);
 }
 
 fn go_forward(s: &mut State) {
@@ -519,55 +593,19 @@ fn go_forward(s: &mut State) {
     sync_address(s);
     if !s.tabs.is_empty() && s.active_tab < s.tabs.len() { s.tabs[s.active_tab] = s.location.clone(); }
     s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), Vec::new()));
+    s.virtual_paths.clear();
     s.filtered.clear();
     s.selected.clear();
     s.cursor = 0;
     s.anchor = None;
     s.loading = true;
     s.status = "loading...".into();
-    let mine = s.generation.fetch_add(1, Ordering::Relaxed) + 1;
-    let generation = s.generation.clone();
-    let handle = s.handle.clone();
-    match target {
-        Location::ThisPc => {
-            let entries = this_pc_entries();
-            handle.update(move |s, _| {
-                if generation.load(Ordering::Relaxed) != mine { return; }
-                s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
-                s.loading = false;
-                s.status.clear();
-                refilter(s);
-            });
-        }
-        Location::Folder(dir) => {
-            std::thread::spawn(move || {
-                load_into(&handle, &generation, mine, dir);
-            });
-        }
-    }
+    dispatch_location_load(s, target, false);
 }
 
 fn reload(s: &mut State) {
-    let mine = s.generation.fetch_add(1, Ordering::Relaxed) + 1;
-    let generation = s.generation.clone();
-    let handle = s.handle.clone();
-    match s.location.clone() {
-        Location::ThisPc => {
-            let entries = this_pc_entries();
-            handle.update(move |s, _| {
-                if generation.load(Ordering::Relaxed) != mine { return; }
-                s.snapshot = Arc::new(Snapshot::new(PathBuf::new(), entries));
-                s.loading = false;
-                s.status.clear();
-                refilter(s);
-            });
-        }
-        Location::Folder(dir) => {
-            std::thread::spawn(move || {
-                load_into(&handle, &generation, mine, dir);
-            });
-        }
-    }
+    let target = s.location.clone();
+    dispatch_location_load(s, target, false);
 }
 
 fn this_pc_entries() -> Vec<Entry> {
@@ -627,7 +665,16 @@ fn entry_path(location: &Location, entry: &Entry) -> Option<PathBuf> {
     match location {
         Location::ThisPc => this_pc_resolve(entry),
         Location::Folder(dir) => Some(dir.join(&entry.name)),
+        Location::Recent | Location::Starred | Location::Network => None,
     }
+}
+
+fn entry_path_at(s: &State, idx: usize) -> Option<PathBuf> {
+    if let Some(p) = s.virtual_paths.get(idx) {
+        return Some(p.clone());
+    }
+    let entry = s.snapshot.entries.get(idx)?;
+    entry_path(&s.location, entry)
 }
 
 
@@ -1163,7 +1210,11 @@ fn dir_size(path: &Path, cancel: &std::sync::atomic::AtomicBool) -> u64 {
 fn refresh_git(s: &mut State) {
     let dir = match &s.location {
         Location::Folder(d) => d.clone(),
-        Location::ThisPc => return,
+        _ => {
+            s.git_branch = None;
+            s.git_dirty = false;
+            return;
+        }
     };
     // find repo root
     let out = std::process::Command::new("git")
@@ -1219,7 +1270,7 @@ fn load_thumbnails(s: &mut State) {
         .enumerate()
         .filter_map(|(i, e)| {
             if e.is_dir { return None; }
-            let path = entry_path(&s.location, e)?;
+            let path = entry_path_at(s, i)?;
             let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
             if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "mp4" | "mkv" | "webm" | "mov" | "avi" | "pdf") {
                 return None;
@@ -1238,7 +1289,7 @@ fn load_thumbnails(s: &mut State) {
             let mut rgba = None;
             let mut dims = None;
             if let Some(img) = image::open(&path2).ok().or_else(|| thumbnail_external(&path2)) {
-                let thumb = img.thumbnail(64, 64);
+                let thumb = img.thumbnail(192, 192);
                 let rgba8 = thumb.to_rgba8();
                 dims = Some((rgba8.width(), rgba8.height()));
                 rgba = Some(rgba8.into_raw());
@@ -1514,7 +1565,15 @@ fn handle_action(s: &mut State, action: &str) -> bool {
         "delete" => { delete_selected(s); true }
         "delete-permanent" => { do_permanent_delete(s); true }
         "properties" => { open_properties(s); true }
-        "search" => { s.search_mode = !s.search_mode; save_settings(s); true }
+        "search" => {
+            s.search_mode = !s.search_mode;
+            if s.search_mode {
+                s.edit_address = false;
+                s.focus_target = Some("search-box".to_string());
+            }
+            save_settings(s);
+            true
+        }
         "hidden" => {
             s.show_hidden = !s.show_hidden;
             refilter(s);
@@ -1559,15 +1618,11 @@ fn handle_action(s: &mut State, action: &str) -> bool {
 fn do_copy(s: &mut State) {
     let mut paths = Vec::new();
     for &idx in &s.selected {
-        if let Some(e) = s.snapshot.entries.get(idx) {
-            if let Some(p) = entry_path(&s.location, e) { paths.push(p); }
-        }
+        if let Some(p) = entry_path_at(s, idx) { paths.push(p); }
     }
     if paths.is_empty() {
         if let Some(&idx) = s.filtered.get(s.cursor) {
-            if let Some(e) = s.snapshot.entries.get(idx) {
-                if let Some(p) = entry_path(&s.location, e) { paths.push(p); }
-            }
+            if let Some(p) = entry_path_at(s, idx) { paths.push(p); }
         }
     }
     if !paths.is_empty() {
@@ -1614,15 +1669,11 @@ fn start_rename(s: &mut State) {
 fn do_permanent_delete(s: &mut State) {
     let mut paths = Vec::new();
     for &idx in &s.selected {
-        if let Some(e) = s.snapshot.entries.get(idx) {
-            if let Some(p) = entry_path(&s.location, e) { paths.push(p); }
-        }
+        if let Some(p) = entry_path_at(s, idx) { paths.push(p); }
     }
     if paths.is_empty() {
         if let Some(&idx) = s.filtered.get(s.cursor) {
-            if let Some(e) = s.snapshot.entries.get(idx) {
-                if let Some(p) = entry_path(&s.location, e) { paths.push(p); }
-            }
+            if let Some(p) = entry_path_at(s, idx) { paths.push(p); }
         }
     }
     if paths.is_empty() { return; }
@@ -1643,8 +1694,7 @@ fn do_permanent_delete(s: &mut State) {
 
 fn open_properties(s: &mut State) {
     if let Some(&idx) = s.filtered.get(s.cursor) {
-        if let Some(e) = s.snapshot.entries.get(idx) {
-            if let Some(p) = entry_path(&s.location, e) {
+        if let Some(p) = entry_path_at(s, idx) {
                 s.properties_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 s.properties_cancel = cancel.clone();
@@ -1675,7 +1725,6 @@ fn open_properties(s: &mut State) {
                         s.properties_loading = false;
                     });
                 });
-            }
         }
     }
 }
@@ -1806,6 +1855,10 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     // Ctrl+L toggles path address editing.
     if ev.key == Key::Command('l') && ev.mods.ctrl {
         s.edit_address = !s.edit_address;
+        if s.edit_address {
+            s.search_mode = false;
+            s.focus_target = Some("addr-input".to_string());
+        }
         return true;
     }
     // Ctrl+Z (Cmd+Z on macOS) restores the last trashed selection. It has to be claimed
@@ -1905,12 +1958,12 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         Key::Enter => {
             if let Some(&index) = s.filtered.get(s.cursor) {
                 if s.snapshot.entries[index].is_dir {
-                    if let Some(path) = entry_path(&s.location, &s.snapshot.entries[index]) {
+                    if let Some(path) = entry_path_at(s, index) {
                         navigate(s, Location::Folder(path));
                         sync_address(s);
                         return true;
                     }
-                } else if let Some(path) = entry_path(&s.location, &s.snapshot.entries[index]) {
+                } else if let Some(path) = entry_path_at(s, index) {
                     if is_archive(&path) {
                         // shortcut: cache-backed extraction, not libarchive virtual FS; upgrade if no-extract reads are needed.
                         let stem = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "archive".into());
@@ -1957,8 +2010,23 @@ fn handle_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                     sync_address(s);
                     return true;
                 }
-                Location::ThisPc => false,
+                Location::ThisPc | Location::Recent | Location::Starred | Location::Network => false,
             }
+        }
+        Key::Text(ref ch)
+            if !ev.mods.ctrl
+                && !ev.mods.alt
+                && !s.edit_address
+                && !s.search_mode
+                && s.renaming.is_none()
+                && !s.batch_rename_open
+                && !s.show_shortcuts
+                && ch.chars().all(|c| !c.is_control()) =>
+        {
+            s.query.text.push_str(&ch);
+            s.focus_target = Some("filter".to_string());
+            refilter(s);
+            true
         }
         Key::Delete => {
             if ev.mods.shift {
@@ -2151,12 +2219,8 @@ fn handle_address_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
 
 /// Rune calls this at the start of every frame. Returns true only when visible state moved.
 fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
-    // Clove's filter field owns the keyboard from the start. `Tx::focus` resolves after the
-    // frame's view is built, so the first attempt lands on frame one; a second covers a
-    // window that had not built its tree yet.
-    if s.focus_attempts < 2 {
-        s.focus_attempts += 1;
-        tx.focus("filter", false);
+    if let Some(target) = s.focus_target.take() {
+        tx.focus(&target, true);
     }
 
     s.bar_time = clock as f32;
@@ -2169,6 +2233,11 @@ fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
         if let Some(volume) = scan.volume() {
             s.storage_capacity = volume.capacity;
             s.storage_used = volume.used();
+            if s.storage_used > 0 {
+                s.storage_bytes[StorageKind::System.index()] = s.storage_used;
+                s.storage_has_data = true;
+                rebuild_bar(s);
+            }
         }
         s.scan = Some(scan);
         tx.wake_after(Duration::from_millis(100));
@@ -2190,6 +2259,14 @@ fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
         match event {
             ScanEvent::Progress(progress) => {
                 s.storage_bytes[progress.kind.index()] = progress.bytes;
+                let counted: u64 = s
+                    .storage_bytes
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| *k != StorageKind::System.index())
+                    .map(|(_, &b)| b)
+                    .sum();
+                s.storage_bytes[StorageKind::System.index()] = s.storage_used.saturating_sub(counted);
                 s.storage_has_data = true;
                 let total: u64 = s.storage_bytes.iter().sum();
                 let capacity = if s.storage_capacity > 0 {
@@ -2210,6 +2287,14 @@ fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
             }
             ScanEvent::Done(report) => {
                 s.storage_bytes[report.kind.index()] = report.bytes;
+                let counted: u64 = s
+                    .storage_bytes
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| *k != StorageKind::System.index())
+                    .map(|(_, &b)| b)
+                    .sum();
+                s.storage_bytes[StorageKind::System.index()] = s.storage_used.saturating_sub(counted);
                 s.storage_has_data = true;
                 let total: u64 = s.storage_bytes.iter().sum();
                 let capacity = if s.storage_capacity > 0 {
@@ -2288,1932 +2373,8 @@ fn human_gb(bytes: u64) -> String {
     }
 }
 
-fn color_f32(rgb: [f32; 3], a: f32) -> Color {
-    Color {
-        r: srgb_to_linear(rgb[0]),
-        g: srgb_to_linear(rgb[1]),
-        b: srgb_to_linear(rgb[2]),
-        a,
-    }
-}
 
-fn format_time(time: Option<std::time::SystemTime>) -> String {
-    let Some(t) = time else { return "—".to_string(); };
-    let Ok(elapsed) = t.elapsed() else { return "—".to_string(); };
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        "just now".to_string()
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else if secs < 86400 * 30 {
-        format!("{}d ago", secs / 86400)
-    } else {
-        format!("{}mo ago", secs / (86400 * 30))
-    }
-}
-
-fn file_icon(entry: &Entry) -> &'static str {
-    if entry.is_dir {
-        return "📁";
-    }
-    let name = entry.name.to_lowercase();
-    if name.ends_with(".rs") || name.ends_with(".py") || name.ends_with(".js") || name.ends_with(".ts") || name.ends_with(".c") || name.ends_with(".cpp") || name.ends_with(".h") || name.ends_with(".go") {
-        "⚡"
-    } else if name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".jpeg") || name.ends_with(".webp") || name.ends_with(".svg") || name.ends_with(".gif") {
-        "🖼"
-    } else if name.ends_with(".zip") || name.ends_with(".tar.gz") || name.ends_with(".tar") || name.ends_with(".7z") || name.ends_with(".gz") {
-        "📦"
-    } else if name.ends_with(".md") || name.ends_with(".txt") || name.ends_with(".pdf") {
-        "📄"
-    } else if name.ends_with(".mp3") || name.ends_with(".flac") || name.ends_with(".wav") {
-        "🎵"
-    } else if name.ends_with(".mp4") || name.ends_with(".mkv") || name.ends_with(".webm") {
-        "🎬"
-    } else if name.ends_with(".json") || name.ends_with(".toml") || name.ends_with(".yaml") || name.ends_with(".yml") {
-        "⚙"
-    } else {
-        "📄"
-    }
-}
-
-fn file_kind_label(entry: &Entry) -> &'static str {
-    if entry.is_dir {
-        return "Folder";
-    }
-    let name = entry.name.to_lowercase();
-    if name.ends_with(".rs") || name.ends_with(".py") || name.ends_with(".js") || name.ends_with(".ts") || name.ends_with(".c") || name.ends_with(".cpp") || name.ends_with(".h") || name.ends_with(".go") {
-        "Code"
-    } else if name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".jpeg") || name.ends_with(".webp") || name.ends_with(".svg") || name.ends_with(".gif") {
-        "Image"
-    } else if name.ends_with(".zip") || name.ends_with(".tar.gz") || name.ends_with(".tar") || name.ends_with(".7z") || name.ends_with(".gz") {
-        "Archive"
-    } else if name.ends_with(".md") || name.ends_with(".txt") || name.ends_with(".pdf") {
-        "Document"
-    } else if name.ends_with(".mp3") || name.ends_with(".flac") || name.ends_with(".wav") {
-        "Audio"
-    } else if name.ends_with(".mp4") || name.ends_with(".mkv") || name.ends_with(".webm") {
-        "Video"
-    } else if name.ends_with(".json") || name.ends_with(".toml") || name.ends_with(".yaml") || name.ends_with(".yml") {
-        "Config"
-    } else {
-        "File"
-    }
-}
-
-fn load_system_icons() -> std::collections::HashMap<String, Pixels> {
-    let mut icons = std::collections::HashMap::new();
-    let keys: &[(&str, &[&str])] = &[
-        ("folder", &[
-            "/usr/share/icons/Yaru/256x256/places/folder.png",
-            "/usr/share/icons/Yaru/48x48/places/folder.png",
-        ]),
-        ("folder-documents", &[
-            "/usr/share/icons/Yaru/256x256/places/folder-documents.png",
-            "/usr/share/icons/Yaru/48x48/places/folder-documents.png",
-        ]),
-        ("folder-download", &[
-            "/usr/share/icons/Yaru/256x256/places/folder-download.png",
-            "/usr/share/icons/Yaru/48x48/places/folder-download.png",
-        ]),
-        ("folder-music", &[
-            "/usr/share/icons/Yaru/256x256/places/folder-music.png",
-            "/usr/share/icons/Yaru/48x48/places/folder-music.png",
-        ]),
-        ("folder-pictures", &[
-            "/usr/share/icons/Yaru/256x256/places/folder-pictures.png",
-            "/usr/share/icons/Yaru/48x48/places/folder-pictures.png",
-        ]),
-        ("folder-videos", &[
-            "/usr/share/icons/Yaru/256x256/places/folder-videos.png",
-            "/usr/share/icons/Yaru/48x48/places/folder-videos.png",
-        ]),
-        ("system-settings", &[
-            "/usr/share/icons/Yaru/48x48/apps/system-settings.png",
-            "/usr/share/icons/Yaru/48x48/apps/preferences-system.png",
-        ]),
-        ("user-home", &[
-            "/usr/share/icons/Yaru/256x256/places/user-home.png",
-            "/usr/share/icons/Yaru/48x48/places/user-home.png",
-        ]),
-        ("user-trash", &[
-            "/usr/share/icons/Yaru/256x256/places/user-trash.png",
-            "/usr/share/icons/Yaru/48x48/places/user-trash.png",
-        ]),
-    ];
-
-    for (k, paths) in keys {
-        for path in *paths {
-            if let Ok(img) = image::open(path) {
-                let thumb = if img.width() > 64 || img.height() > 64 {
-                    img.thumbnail(64, 64)
-                } else {
-                    img
-                };
-                let rgba = thumb.to_rgba8();
-                let px = Pixels::new();
-                px.set(rgba.width(), rgba.height(), rgba.into_raw());
-                icons.insert(k.to_string(), px);
-                break;
-            }
-        }
-    }
-    icons
-}
-
-fn entry_system_icon_key(entry: &Entry) -> &'static str {
-    if entry.is_dir {
-        match entry.name.to_lowercase().as_str() {
-            "documents" => "folder-documents",
-            "downloads" => "folder-download",
-            "music" => "folder-music",
-            "pictures" => "folder-pictures",
-            "videos" => "folder-videos",
-            "trash" | ".trash" => "user-trash",
-            _ => "folder",
-        }
-    } else {
-        let name_lower = entry.name.to_lowercase();
-        if name_lower.ends_with(".desktop") {
-            "system-settings"
-        } else {
-            "file"
-        }
-    }
-}
-
-fn sidebar_icon(name: &str) -> &'static str {
-    match name.to_lowercase().as_str() {
-        "home" => "⌂",
-        "recent" => "🕒",
-        "starred" => "★",
-        "network" => "🖥",
-        "trash" => "🗑",
-        "downloads" => "↓",
-        "projects" => "📁",
-        "pictures" => "🖼",
-        "videos" => "🎬",
-        "music" => "🎵",
-        "documents" => "📄",
-        "desktop" => "🖥",
-        "work" => "💼",
-        _ => "📁",
-    }
-}
-
-fn storage_card_el(s: &State) -> El {
-    let used_gb = human_gb(s.storage_used);
-    let cap_gb = human_gb(s.storage_capacity);
-    let pct = if s.storage_capacity > 0 {
-        ((s.storage_used as f64 / s.storage_capacity as f64) * 100.0).round() as u64
-    } else {
-        0
-    };
-
-    let status_str = if s.scan_started && !s.storage_ready {
-        "Scanning disk…".to_string()
-    } else if s.storage_has_data {
-        format!("{used_gb} used of {cap_gb} ({pct}%)")
-    } else {
-        "Calculating disk usage…".to_string()
-    };
-
-    col()
-        .key("storage-card")
-        .w_full()
-        .padding(10.0)
-        .gap(8.0)
-        .radius(tokens::RADIUS_CARD)
-        .fill(surface())
-        .child(
-            row()
-                .key("storage-header")
-                .w_full()
-                .h(20.0)
-                .center_y()
-                .child(
-                    row()
-                        .gap(6.0)
-                        .center_y()
-                        .child(text("💾").font(type_::LABEL).color(accent()))
-                        .child(text("STORAGE").font(type_::SECTION).color(ink()))
-                )
-                .child(el().grow(1.0))
-                .child(
-                    text(status_str)
-                        .font(type_::LABEL)
-                        .color(if s.scan_started && !s.storage_ready { accent() } else { ink_secondary() })
-                )
-                .child(
-                    el()
-                        .key("btn-rescan")
-                        .label("Rescan disk")
-                        .px(6.0)
-                        .h(18.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(bg())
-                        .center()
-                        .child(text("↻").font(type_::LABEL).color(ink_secondary()))
-                        .on_press(|st: &mut State| {
-                            if let Some(path) = storage_cache_path() { let _ = std::fs::remove_file(path); }
-                            st.storage_bytes = [0; KIND_COUNT];
-                            st.storage_capacity = 0;
-                            st.storage_used = 0;
-                            st.storage_ready = false;
-                            st.storage_has_data = false;
-                            st.scan = None;
-                            st.scan_started = false;
-                            st.status = "measuring disk…".into();
-                            st.wake_bar();
-                            rebuild_bar(st);
-                        })
-                )
-                .child(
-                    el()
-                        .key("btn-collapse-storage")
-                        .label("Collapse storage bar")
-                        .px(6.0)
-                        .h(18.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(bg())
-                        .center()
-                        .child(text("▲").font(type_::LABEL).color(ink_secondary()))
-                        .on_press(|st: &mut State| {
-                            st.storage_bar_open = false;
-                        })
-                )
-        )
-        // The signature: Clove's dithered storage bar.
-        .child(
-            el()
-                .key("bar")
-                .w_full()
-                .h(BAR_H)
-                .radius(tokens::RADIUS_BAR)
-                .clip_rounded(tokens::RADIUS_BAR)
-                .on_layout(|s: &mut State, [_, _, w, _]| {
-                    if (s.bar_width - w).abs() >= 0.5 {
-                        s.bar_width = w;
-                        rebuild_bar(s);
-                    }
-                })
-                .pixels_fit(&s.bar, rune::SurfaceFit::Fill),
-        )
-        // Kind legend under the bar.
-        .child(legend_el(s))
-}
-
-fn legend_el(s: &State) -> El {
-    let mut legend = row()
-        .key("legend")
-        .w_full()
-        .flex_wrap()
-        .gap(10.0)
-        .center_y();
-    for k in 0..KIND_COUNT {
-        let bytes = s.storage_bytes[k];
-        let has_kind = bytes > 0;
-        let label = if s.storage_has_data && has_kind {
-            format!("{} {}", tokens::STORAGE_KIND_NAMES[k], human_gb(bytes))
-        } else {
-            tokens::STORAGE_KIND_NAMES[k].to_string()
-        };
-        legend = legend.child(
-            row()
-                .key(format!("legend-{k}"))
-                .gap(5.0)
-                .center_y()
-                .child(
-                    el()
-                        .w(7.0)
-                        .h(7.0)
-                        .radius(3.5)
-                        .fill(color_f32(tokens::STORAGE_KIND_RGB[k], if has_kind { 1.0 } else { 0.35 })),
-                )
-                .child(
-                    text(label)
-                        .font(type_::LABEL)
-                        .color(if has_kind { ink() } else { ink_muted() })
-                ),
-        );
-    }
-    legend
-}
-
-fn format_size(size: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = size as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{size} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-fn row_el(s: &State, index: usize) -> El {
-    let entry: &Entry = &s.snapshot.entries[index];
-    let selected = s.selected.contains(&index);
-    let renaming = s.renaming == Some(index);
-    let path = entry_path(&s.location, entry);
-    let is_dir = entry.is_dir;
-
-    let mut r = row()
-        .key(format!("row-{index}"))
-        .h(ROW_H)
-        .px(8.0)
-        .gap(8.0)
-        .center_y()
-        .radius(tokens::RADIUS_ROW)
-        .fill(if selected { selection_strong() } else { Color::TRANSPARENT })
-        .on_press(move |s: &mut State| {
-            s.selected.clear();
-            s.selected.insert(index);
-        });
-
-    if let Some(target) = path.clone() {
-        r = r.on_double_press(move |s: &mut State| {
-            if is_dir {
-                navigate(s, Location::Folder(target.clone()));
-                sync_address(s);
-            } else {
-                platform::open_path(&target);
-            }
-        });
-    }
-
-    // File icon
-    let icon_key = entry_system_icon_key(entry);
-    if let Some(sys_px) = s.system_icons.get(icon_key) {
-        r = r.child(
-            el()
-                .w(20.0).h(20.0)
-                .center()
-                .pixels_fit(sys_px, rune::SurfaceFit::Fit)
-        );
-    } else {
-        r = r.child(
-            text(file_icon(entry))
-                .font(type_::LABEL)
-                .color(if entry.is_dir { folder_orange() } else { ink_secondary() })
-        );
-    }
-
-    // Name column (grow 1.0)
-    if renaming {
-        r = r.child(
-            text_input(&s.rename_text, type_::BODY)
-                .key(format!("rename-{index}"))
-                .label("Rename")
-                .single_line()
-                .grow(1.0)
-                .color(ink())
-                .on_edit(|s: &mut State| &mut s.rename_text)
-                .on_input_key(handle_rename_key),
-        );
-    } else {
-        r = r.child(
-            text(entry.name.clone())
-                .font(type_::BODY)
-                .color(if entry.is_dir { ink() } else { ink_secondary() })
-                .grow(1.0),
-        );
-    }
-
-    // Size column (90px)
-    r = r.child(
-        el()
-            .w(90.0)
-            .child(
-                text(if entry.is_dir {
-                    "—".to_owned()
-                } else {
-                    format_size(entry.size)
-                })
-                .font(type_::LABEL)
-                .color(ink_muted())
-            )
-    );
-
-    if s.view_mode == 0 {
-        // Type column (80px)
-        r = r.child(
-            el()
-                .w(80.0)
-                .child(
-                    text(file_kind_label(entry))
-                        .font(type_::LABEL)
-                        .color(ink_muted())
-                )
-        );
-
-        // Modified column (120px)
-        r = r.child(
-            el()
-                .w(120.0)
-                .child(
-                    text(format_time(entry.modified))
-                        .font(type_::LABEL)
-                        .color(ink_muted())
-                )
-        );
-    }
-
-    let drag_paths: Vec<PathBuf> = if selected {
-        s.selected.iter().filter_map(|&i| s.snapshot.entries.get(i).and_then(|e| entry_path(&s.location, e))).collect()
-    } else {
-        entry_path(&s.location, entry).into_iter().collect()
-    };
-    if !drag_paths.is_empty() {
-        r = r.drag_out(move |_: &State| {
-            let mut item = DragItem::new();
-            for p in &drag_paths { item = item.file(p.clone()); }
-            Some(item)
-        });
-    }
-    let idx2 = index;
-    r = r.on_secondary_press(move |s: &mut State, _, _| {
-        s.context_menu = Some(idx2);
-    });
-    r
-}
-
-fn location_label(loc: &Location) -> String {
-    match loc {
-        Location::ThisPc => "This PC".to_string(),
-        Location::Folder(p) => p.display().to_string(),
-    }
-}
-
-fn colhdr_item(label: &'static str, field: u8, s: &State) -> El {
-    let active = s.sort_by == field;
-    let arrow = if active { if s.sort_desc { " ↓" } else { " ↑" } } else { "" };
-    el()
-        .key(format!("colhdr-{field}"))
-        .grow(if field == 0 { 1.0 } else { 0.0 })
-        .w(match field {
-            0 => 0.0,
-            1 => 90.0,
-            2 => 80.0,
-            3 => 120.0,
-            _ => 80.0,
-        })
-        .h(22.0)
-        .center_y()
-        .child(
-            text(format!("{}{}", label, arrow))
-                .font(type_::LABEL)
-                .color(if active { ink() } else { ink_muted() })
-        )
-        .on_press(move |st: &mut State| {
-            if st.sort_by == field {
-                st.sort_desc = !st.sort_desc;
-            } else {
-                st.sort_by = field;
-                st.sort_desc = false;
-            }
-            refilter(st);
-            save_settings(st);
-        })
-}
-
-fn ctx_item(label: &'static str, on: impl Fn(&mut State) + 'static) -> El {
-    let on = std::rc::Rc::new(on);
-    let on2 = on.clone();
-    el()
-        .key(format!("ctx-{}", label))
-        .w_full()
-        .h(24.0)
-        .px(8.0)
-        .center_y()
-        .radius(tokens::RADIUS_CONTROL)
-        .child(text(label).font(type_::BODY).color(ink()))
-        .on_press(move |s: &mut State| on2(s))
-}
-
-fn sidebar_el(s: &State) -> El {
-    let mut col = col()
-        .key("sidebar")
-        .w(230.0)
-        .h_full()
-        .padding(10.0)
-        .gap(3.0)
-        .fill(sidebar_bg())
-        .border(1.0, hairline());
-
-    // Sidebar Header: Search, Title "Files", Menu
-    col = col.child(
-        row()
-            .key("sb-header")
-            .w_full()
-            .h(36.0)
-            .px(6.0)
-            .center_y()
-            .child(
-                el()
-                    .key("sb-btn-search")
-                    .label("Toggle search")
-                    .w(28.0).h(28.0)
-                    .radius(tokens::RADIUS_CONTROL)
-                    .fill(if s.search_mode { accent_muted() } else { Color::TRANSPARENT })
-                    .center()
-                    .child(text("⌕").font(type_::TITLE).color(if s.search_mode { accent() } else { ink_muted() }))
-                    .on_press(|st: &mut State| {
-                        st.search_mode = !st.search_mode;
-                    })
-            )
-            .child(el().grow(1.0))
-            .child(
-                text("Files")
-                    .font(type_::TITLE)
-                    .color(ink())
-            )
-            .child(el().grow(1.0))
-            .child(
-                el()
-                    .key("sb-btn-menu")
-                    .label("Shortcuts and settings")
-                    .w(28.0).h(28.0)
-                    .radius(tokens::RADIUS_CONTROL)
-                    .fill(Color::TRANSPARENT)
-                    .center()
-                    .child(text("≡").font(type_::TITLE).color(ink_muted()))
-                    .on_press(|st: &mut State| {
-                        st.show_shortcuts = !st.show_shortcuts;
-                    })
-            )
-    );
-
-    // Core Places: Home, Recent, Starred, Network, Trash
-    let home = platform::home_dir();
-    let is_home_active = match &s.location {
-        Location::Folder(p) => p == &home,
-        Location::ThisPc => false,
-    };
-
-    let target_home = home.clone();
-    col = col.child(
-        el()
-            .key("sb-place-home")
-            .w_full()
-            .h(32.0)
-            .px(10.0)
-            .center_y()
-            .radius(tokens::RADIUS_CONTROL)
-            .fill(if is_home_active { selection_strong() } else { Color::TRANSPARENT })
-            .child(
-                row().gap(10.0).center_y()
-                    .child(text("⌂").font(type_::BODY).color(if is_home_active { accent() } else { ink_muted() }))
-                    .child(text("Home").font(type_::BODY).color(if is_home_active { ink() } else { ink_secondary() }))
-            )
-            .on_press(move |st: &mut State| {
-                navigate(st, Location::Folder(target_home.clone()));
-                sync_address(st);
-            })
-    );
-
-    let places: &[(&str, &str)] = &[
-        ("Recent", "🕒"),
-        ("Starred", "★"),
-        ("Network", "🖥"),
-        ("Trash", "🗑"),
-    ];
-
-    for &(name, icon) in places {
-        let is_active = false;
-        col = col.child(
-            el()
-                .key(format!("sb-place-{}", name))
-                .w_full()
-                .h(32.0)
-                .px(10.0)
-                .center_y()
-                .radius(tokens::RADIUS_CONTROL)
-                .fill(if is_active { selection_strong() } else { Color::TRANSPARENT })
-                .child(
-                    row().gap(10.0).center_y()
-                        .child(text(icon).font(type_::LABEL).color(if is_active { accent() } else { ink_muted() }))
-                        .child(text(name).font(type_::BODY).color(if is_active { ink() } else { ink_secondary() }))
-                )
-                .on_press(move |st: &mut State| {
-                    if name == "Trash" {
-                        let trash_dir = platform::home_dir().join(".local/share/Trash/files");
-                        if trash_dir.is_dir() {
-                            navigate(st, Location::Folder(trash_dir));
-                        } else {
-                            st.status = "Trash is empty".into();
-                        }
-                    } else if name == "Network" {
-                        navigate(st, Location::ThisPc);
-                    } else {
-                        st.status = format!("{name} view").into();
-                    }
-                    sync_address(st);
-                })
-        );
-    }
-
-    // Divider
-    col = col.child(
-        row().key("sb-div-1").w_full().h(1.0).fill(hairline()).padding(2.0)
-    );
-
-    // Bookmarks Section: Downloads, Projects, Pictures, Videos, Music, Documents, etc.
-    for (name, path) in platform::quick_access() {
-        let target = path.clone();
-        let is_active = match &s.location {
-            Location::Folder(p) => p == &target,
-            Location::ThisPc => false,
-        };
-        let icon = sidebar_icon(name);
-        col = col.child(
-            el()
-                .key(format!("sb-bm-{}", name))
-                .w_full()
-                .h(32.0)
-                .px(10.0)
-                .center_y()
-                .radius(tokens::RADIUS_CONTROL)
-                .fill(if is_active { selection_strong() } else { Color::TRANSPARENT })
-                .child(
-                    row().gap(10.0).center_y()
-                        .child(text(icon).font(type_::BODY).color(if is_active { accent() } else { ink_muted() }))
-                        .child(text(name).font(type_::BODY).color(if is_active { ink() } else { ink_secondary() }))
-                )
-                .on_press(move |st: &mut State| {
-                    navigate(st, Location::Folder(target.clone()));
-                    sync_address(st);
-                }),
-        );
-    }
-
-    // Divider
-    col = col.child(
-        row().key("sb-div-2").w_full().h(1.0).fill(hairline()).padding(2.0)
-    );
-
-    // Disks & Mounts
-    let is_this_pc_active = matches!(s.location, Location::ThisPc);
-    col = col.child(
-        el()
-            .key("sb-mnt-thispc")
-            .w_full()
-            .h(32.0)
-            .px(10.0)
-            .center_y()
-            .radius(tokens::RADIUS_CONTROL)
-            .fill(if is_this_pc_active { selection_strong() } else { Color::TRANSPARENT })
-            .child(
-                row().gap(10.0).center_y()
-                    .child(text("💻").font(type_::LABEL).color(if is_this_pc_active { accent() } else { ink_muted() }))
-                    .child(text("This PC").font(type_::BODY).color(if is_this_pc_active { ink() } else { ink_secondary() }))
-            )
-            .on_press(|st: &mut State| {
-                navigate(st, Location::ThisPc);
-                sync_address(st);
-            }),
-    );
-
-    for (name, path) in platform::mount_entries() {
-        let target = path.clone();
-        let is_active = match &s.location {
-            Location::Folder(p) => p == &target,
-            Location::ThisPc => false,
-        };
-        let label = if name == "/" { "File System".to_string() } else { name.clone() };
-        col = col.child(
-            el()
-                .key(format!("sb-mnt-{}", name))
-                .w_full()
-                .h(32.0)
-                .px(10.0)
-                .center_y()
-                .radius(tokens::RADIUS_CONTROL)
-                .fill(if is_active { selection_strong() } else { Color::TRANSPARENT })
-                .child(
-                    row().gap(10.0).center_y()
-                        .child(text("💾").font(type_::LABEL).color(if is_active { accent() } else { ink_muted() }))
-                        .child(text(label).font(type_::BODY).color(if is_active { ink() } else { ink_secondary() }))
-                )
-                .on_press(move |st: &mut State| {
-                    navigate(st, Location::Folder(target.clone()));
-                    sync_address(st);
-                }),
-        );
-    }
-
-    col = col.child(el().grow(1.0));
-
-    // Footer
-    col = col.child(
-        row()
-            .key("sb-footer")
-            .w_full()
-            .px(6.0).pb(4.0)
-            .center_y()
-            .child(text("🍀 Clove").font(type_::LABEL).color(ink_muted()))
-            .child(el().grow(1.0))
-            .child(text("Rust").font(type_::LABEL).color(accent_muted()))
-    );
-
-    col
-}
-
-fn view(s: &State, cx: &mut Cx<State>) -> El {
-    let scale = cx.env().scale;
-    if (scale - s.ui_scale).abs() > 0.01 {
-        let handle = s.handle.clone();
-        handle.update(move |s, _| {
-            if (s.ui_scale - scale).abs() > 0.01 {
-                s.ui_scale = scale;
-                rebuild_bar(s);
-            }
-        });
-    }
-    let count = s.filtered.len();
-    let total = s.snapshot.len();
-
-    row()
-        .key("root")
-        .w_full()
-        .h_full()
-        .fill(bg())
-        .gap(8.0)
-        .on_drop_files(|s: &mut State, _f, _| { s.drop_hover = false; })
-        .child(sidebar_el(s))
-        .child(
-            col()
-                .key("main")
-                .grow(1.0)
-                .padding(12.0)
-                .gap(8.0)
-        // Adwaita-style unified Headerbar over main view
-        .child({
-            let breadcrumb_pill = if s.edit_address {
-                row()
-                    .key("address-box")
-                    .w(320.0)
-                    .h(32.0)
-                    .px(10.0)
-                    .radius(tokens::RADIUS_PILL)
-                    .fill(surface())
-                    .border(1.0, accent())
-                    .center_y()
-                    .child(
-                        text_input(&s.address, type_::BODY)
-                            .key("address")
-                            .label("Address")
-                            .single_line()
-                            .grow(1.0)
-                            .color(ink())
-                            .placeholder("Enter path...", ink_muted())
-                            .on_edit(|s: &mut State| &mut s.address)
-                            .on_input_key(handle_address_key),
-                    )
-                    .child(
-                        el()
-                            .key("btn-address-cancel")
-                            .label("Cancel editing")
-                            .px(6.0).h(20.0).radius(tokens::RADIUS_CONTROL)
-                            .center()
-                            .child(text("✕").font(type_::LABEL).color(ink_muted()))
-                            .on_press(|s: &mut State| { s.edit_address = false; sync_address(s); })
-                    )
-            } else {
-                let mut pill = row()
-                    .key("breadcrumb-pill")
-                    .px(14.0).h(32.0)
-                    .gap(6.0)
-                    .radius(tokens::RADIUS_PILL)
-                    .fill(surface())
-                    .border(1.0, hairline())
-                    .center_y()
-                    .on_press(|s: &mut State| {
-                        s.edit_address = true;
-                    });
-
-                match &s.location {
-                    Location::ThisPc => {
-                        pill = pill.child(text("💻").font(type_::LABEL));
-                        pill = pill.child(text("This PC").font(type_::BODY).color(ink()));
-                    }
-                    Location::Folder(path) => {
-                        let home = platform::home_dir();
-                        if path == &home {
-                            pill = pill.child(text("⌂").font(type_::BODY).color(accent()));
-                            pill = pill.child(text("Home").font(type_::BODY).color(ink()));
-                        } else if path.starts_with(&home) {
-                            pill = pill.child(text("⌂").font(type_::BODY).color(accent()));
-                            pill = pill.child(text("Home").font(type_::BODY).color(ink_secondary()));
-                            if let Ok(rel) = path.strip_prefix(&home) {
-                                for comp in rel.components() {
-                                    let name = comp.as_os_str().to_string_lossy().to_string();
-                                    pill = pill.child(text("›").font(type_::LABEL).color(ink_muted()));
-                                    pill = pill.child(text(name).font(type_::BODY).color(ink()));
-                                }
-                            }
-                        } else {
-                            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string());
-                            pill = pill.child(text("📁").font(type_::LABEL).color(accent()));
-                            pill = pill.child(text(name).font(type_::BODY).color(ink()));
-                        }
-                    }
-                }
-                pill = pill.child(text("▾").font(type_::LABEL).color(ink_muted()));
-                pill
-            };
-
-            row()
-                .key("headerbar")
-                .w_full()
-                .h(38.0)
-                .gap(8.0)
-                .center_y()
-                .child(
-                    el()
-                        .key("btn-back")
-                        .label("Back")
-                        .w(28.0).h(28.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(if s.history_back.is_empty() { Color::TRANSPARENT } else { surface() })
-                        .center()
-                        .child(text("‹").font(type_::TITLE).color(if s.history_back.is_empty() { ink_muted() } else { ink() }))
-                        .on_press(|s: &mut State| { go_back(s); sync_address(s); })
-                )
-                .child(
-                    el()
-                        .key("btn-fwd")
-                        .label("Forward")
-                        .w(28.0).h(28.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(if s.history_forward.is_empty() { Color::TRANSPARENT } else { surface() })
-                        .center()
-                        .child(text("›").font(type_::TITLE).color(if s.history_forward.is_empty() { ink_muted() } else { ink() }))
-                        .on_press(|s: &mut State| { go_forward(s); sync_address(s); })
-                )
-                .child(
-                    el()
-                        .key("btn-up")
-                        .label("Up one folder")
-                        .w(28.0).h(28.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(surface())
-                        .center()
-                        .child(text("↑").font(type_::BODY).color(ink()))
-                        .on_press(|s: &mut State| {
-                            if let Location::Folder(dir) = s.location.clone() {
-                                if let Some(parent) = dir.parent().map(Path::to_path_buf) {
-                                    navigate(s, Location::Folder(parent));
-                                } else {
-                                    navigate(s, Location::ThisPc);
-                                }
-                                sync_address(s);
-                            }
-                        })
-                )
-                .child(el().grow(1.0))
-                .child(breadcrumb_pill)
-                .child(el().grow(1.0))
-                .child(
-                    el()
-                        .key("btn-new-folder")
-                        .label("New folder")
-                        .w(28.0).h(28.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(surface())
-                        .center()
-                        .child(text("📁+").font(type_::LABEL).color(ink()))
-                        .on_press(|s: &mut State| { do_new_folder(s); })
-                )
-                .child(
-                    el()
-                        .key("btn-terminal")
-                        .label("Open terminal here")
-                        .w(28.0).h(28.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(surface())
-                        .center()
-                        .child(text(">_").font(type_::LABEL).color(accent()))
-                        .on_press(|s: &mut State| {
-                            let dir = match &s.location {
-                                Location::Folder(d) => d.clone(),
-                                Location::ThisPc => platform::home_dir(),
-                            };
-                            platform::open_terminal_here(&dir);
-                            s.status = "opening terminal".into();
-                        })
-                )
-                .child(
-                    row()
-                        .key("view-mode-group")
-                        .gap(2.0)
-                        .padding(2.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(surface())
-                        .child(
-                            el()
-                                .key("btn-view-grid")
-                                .label("Grid view")
-                                .px(7.0).h(24.0).radius(tokens::RADIUS_CONTROL)
-                                .fill(if s.view_mode == 2 { selection_strong() } else { Color::TRANSPARENT })
-                                .center()
-                                .child(text("☷").font(type_::LABEL).color(if s.view_mode == 2 { ink() } else { ink_muted() }))
-                                .on_press(|s: &mut State| { s.view_mode = 2; save_settings(s); s.status = "view: grid".into(); load_thumbnails(s); })
-                        )
-                        .child(
-                            el()
-                                .key("btn-view-details")
-                                .label("Details view")
-                                .px(7.0).h(24.0).radius(tokens::RADIUS_CONTROL)
-                                .fill(if s.view_mode == 0 { selection_strong() } else { Color::TRANSPARENT })
-                                .center()
-                                .child(text("☰").font(type_::LABEL).color(if s.view_mode == 0 { ink() } else { ink_muted() }))
-                                .on_press(|s: &mut State| { s.view_mode = 0; save_settings(s); })
-                        )
-                )
-                .child(
-                    el()
-                        .key("btn-storage-toggle")
-                        .label("Toggle storage bar")
-                        .px(8.0).h(28.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(if s.storage_bar_open { accent_muted() } else { surface() })
-                        .border(1.0, if s.storage_bar_open { accent() } else { hairline() })
-                        .center()
-                        .child(
-                            row().gap(4.0).center_y()
-                                .child(text("💾").font(type_::LABEL).color(if s.storage_bar_open { accent() } else { ink_muted() }))
-                                .child(text("Storage").font(type_::LABEL).color(if s.storage_bar_open { ink() } else { ink_secondary() }))
-                        )
-                        .on_press(|s: &mut State| {
-                            s.storage_bar_open = !s.storage_bar_open;
-                        })
-                )
-                .child(
-                    el()
-                        .key("btn-shortcuts-toggle")
-                        .label("Keyboard shortcuts")
-                        .w(28.0).h(28.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(surface())
-                        .center()
-                        .child(text("⌨").font(type_::LABEL).color(ink_muted()))
-                        .on_press(|s: &mut State| { s.show_shortcuts = !s.show_shortcuts; })
-                )
-        })
-        // Multi-tab bar (only shown if more than 1 tab open)
-        .child(if s.tabs.len() > 1 {
-            row()
-                .key("tabs-bar")
-                .w_full()
-                .h(28.0)
-                .gap(4.0)
-                .center_y()
-                .children((0..s.tabs.len()).map(|i| {
-                    let active = i == s.active_tab;
-                    let (icon, name) = match &s.tabs[i] {
-                        Location::ThisPc => ("💻", "This PC".to_string()),
-                        Location::Folder(p) => {
-                            let n = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string());
-                            ("📁", if n.is_empty() { "/".to_string() } else { n })
-                        }
-                    };
-                    let mut tab = row()
-                        .key(format!("tab-{i}"))
-                        .px(8.0).h(24.0)
-                        .gap(6.0)
-                        .center_y()
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(if active { surface() } else { Color::TRANSPARENT })
-                        .child(text(icon).font(type_::LABEL).color(if active { accent() } else { ink_muted() }))
-                        .child(text(name).font(type_::LABEL).color(if active { ink() } else { ink_secondary() }))
-                        .on_press(move |s: &mut State| {
-                            if i < s.tabs.len() {
-                                s.active_tab = i;
-                                let target = s.tabs[i].clone();
-                                navigate(s, target);
-                                sync_address(s);
-                            }
-                        });
-                    let close_i = i;
-                    tab = tab.child(
-                        el()
-                            .key(format!("tab-close-{close_i}"))
-                            .label("Close tab")
-                            .w(14.0).h(14.0)
-                            .radius(3.0)
-                            .center()
-                            .child(text("×").font(type_::LABEL).color(ink_muted()))
-                            .on_press(move |s: &mut State| {
-                                if s.tabs.len() > 1 && close_i < s.tabs.len() {
-                                    s.tabs.remove(close_i);
-                                    if s.active_tab >= s.tabs.len() { s.active_tab = s.tabs.len() - 1; }
-                                    let target = s.tabs[s.active_tab].clone();
-                                    navigate(s, target);
-                                    sync_address(s);
-                                    save_tabs(s);
-                                }
-                            })
-                    );
-                    tab
-                }))
-                .child(
-                    el()
-                        .key("btn-new-tab")
-                        .label("New tab")
-                        .w(22.0).h(22.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(Color::TRANSPARENT)
-                        .center()
-                        .child(text("+").font(type_::BODY).color(ink_muted()))
-                        .on_press(|s: &mut State| {
-                            s.tabs.push(s.location.clone());
-                            s.active_tab = s.tabs.len() - 1;
-                            save_tabs(s);
-                        })
-                )
-        } else {
-            row().key("tabs-off").w_full().h(0.0)
-        })
-        // Collapsible Clove Storage Card (The Signature)
-        .child(if s.storage_bar_open {
-            storage_card_el(s)
-        } else {
-            row().key("storage-off").w_full().h(0.0)
-        })
-        // Quick filter and action row (if search active or query not empty)
-        .child(if s.search_mode || !s.query.text.is_empty() {
-            row()
-                .key("filter-action-row")
-                .w_full()
-                .h(32.0)
-                .gap(8.0)
-                .center_y()
-                .child(
-                    row()
-                        .key("filter-box")
-                        .grow(1.0)
-                        .h(32.0)
-                        .px(10.0)
-                        .gap(6.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(surface())
-                        .center_y()
-                        .child(text("⌕").font(type_::BODY).color(ink_muted()))
-                        .child(
-                            text_input(&s.query, type_::BODY)
-                                .key("filter")
-                                .label("Filter files by name")
-                                .single_line()
-                                .grow(1.0)
-                                .color(ink())
-                                .placeholder("Filter files...", ink_muted())
-                                .on_edit(|s: &mut State| &mut s.query)
-                                .on_input_change(|s: &mut State, _| refilter(s))
-                                .on_input_key(handle_key),
-                        )
-                        .child(
-                            text(if count == total {
-                                format!("{total} items")
-                            } else {
-                                format!("{count} of {total}")
-                            })
-                            .font(type_::LABEL)
-                            .color(ink_muted())
-                        )
-                )
-        } else {
-            row().key("filter-off").w_full().h(0.0)
-        })
-        .child(row().key("hairline").w_full().h(1.0).fill(hairline()))
-        // Search within folder (Ctrl+F).
-        .child(if s.search_mode {
-            col()
-                .key("search-row")
-                .w_full()
-                .h(32.0)
-                .px(8.0)
-                .radius(tokens::RADIUS_CONTROL)
-                .fill(surface())
-                .center_y()
-                .child(
-                    text_input(&s.search_query, type_::BODY)
-                        .key("search")
-                        .label("Search recursively")
-                        .single_line()
-                        .grow(1.0)
-                        .color(ink())
-                        .placeholder("search files in this folder...", ink_secondary())
-                        .on_edit(|s: &mut State| &mut s.search_query)
-                        .on_input_change(|s: &mut State, _| trigger_search(s)),
-                )
-        } else {
-            col().key("search-off").w_full().h(0.0)
-        })
-        // Column headers (Details view).
-        .child(if s.view_mode == 0 {
-            row()
-                .key("colhdr")
-                .w_full()
-                .h(20.0)
-                .px(8.0)
-                .center_y()
-                .gap(8.0)
-                .child(colhdr_item("Name", 0, s))
-                .child(colhdr_item("Size", 1, s))
-                .child(colhdr_item("Type", 2, s))
-                .child(colhdr_item("Modified", 3, s))
-        } else {
-            row().key("colhdr-off").w_full().h(0.0)
-        })
-        // Virtualized listing: only mounted rows build.
-        .child(
-            col()
-                .key("viewport")
-                .scroll(ScrollSpec { stick_bottom: false })
-                .grow(1.0)
-                .min_h(0.0)
-                .fill(if s.drop_hover { selection() } else { Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 } })
-                .on_drop_hover(|s: &mut State, over, _| { s.drop_hover = over; })
-                .on_drop_files(handle_drop_files)
-                .child(if s.search_mode {
-                    let mut col = col().key("search-results").w_full().gap(2.0);
-                    for (i, p) in s.search_results.iter().take(200).enumerate() {
-                        col = col.child(
-                            text(p.display().to_string())
-                                .key(format!("sr-{i}"))
-                                .font(type_::BODY)
-                                .color(ink_secondary()),
-                        );
-                    }
-                    if s.search_results.is_empty() {
-                        col = col.child(text("no results").font(type_::LABEL).color(ink_secondary()));
-                    } else {
-                        col = col.child(text(format!("{} results", s.search_results.len())).font(type_::LABEL).color(ink_secondary()));
-                    }
-                    col
-                } else if s.view_mode == 2 {
-                    let mut row = row().key("grid").w_full().flex_wrap().gap(24.0).padding(20.0);
-                    for i in 0..count {
-                        let idx = s.filtered[i];
-                        let entry = &s.snapshot.entries[idx];
-                        let name = entry.name.clone();
-                        let path = entry_path(&s.location, entry);
-                        let thumb = path.as_ref().and_then(|p| s.thumbnails.get(p));
-                        let is_selected = s.selected.contains(&idx);
-                        let mut card = col()
-                            .key(format!("card-{idx}"))
-                            .w(104.0)
-                            .h(118.0)
-                            .padding(6.0)
-                            .gap(6.0)
-                            .radius(tokens::RADIUS_CARD)
-                            .fill(if is_selected { selection_strong() } else { Color::TRANSPARENT })
-                            .border(1.0, if is_selected { accent() } else { Color::TRANSPARENT })
-                            .center()
-                            .on_press(move |s: &mut State| {
-                                s.cursor = i;
-                                s.selected.clear();
-                                s.selected.insert(idx);
-                            });
-
-                        let target_path = path.clone();
-                        let is_dir = entry.is_dir;
-                        if let Some(target) = target_path {
-                            card = card.on_double_press(move |s: &mut State| {
-                                if is_dir {
-                                    navigate(s, Location::Folder(target.clone()));
-                                    sync_address(s);
-                                } else {
-                                    platform::open_path(&target);
-                                }
-                            });
-                        }
-
-                        if let Some((w, h, rgba)) = thumb {
-                            let px = Pixels::new();
-                            px.set(*w, *h, rgba.clone());
-                            card = card.child(
-                                el()
-                                    .w(64.0).h(60.0)
-                                    .radius(tokens::RADIUS_CONTROL)
-                                    .clip_rounded(tokens::RADIUS_CONTROL)
-                                    .pixels_fit(&px, rune::SurfaceFit::Fit)
-                            );
-                        } else {
-                            let icon_key = entry_system_icon_key(entry);
-                            if let Some(sys_px) = s.system_icons.get(icon_key) {
-                                card = card.child(
-                                    el()
-                                        .w(64.0).h(60.0)
-                                        .center()
-                                        .pixels_fit(sys_px, rune::SurfaceFit::Fit)
-                                );
-                            } else {
-                                card = card.child(
-                                    el()
-                                        .w(56.0).h(52.0)
-                                        .radius(tokens::RADIUS_CONTROL)
-                                        .fill(if entry.is_dir { folder_orange() } else { surface() })
-                                        .center()
-                                        .child(
-                                            text(if entry.is_dir { "📁" } else { file_icon(entry) })
-                                                .font(type_::TITLE)
-                                                .color(ink())
-                                        )
-                                );
-                            }
-                        }
-
-                        card = card.child(
-                            text(name)
-                                .font(type_::LABEL)
-                                .color(if is_selected { ink() } else { ink_secondary() })
-                                .max_lines(2)
-                        );
-                        let idx2 = idx;
-                        card = card.on_secondary_press(move |s: &mut State, _, _| {
-                            s.context_menu = Some(idx2);
-                        });
-                        row = row.child(card);
-                    }
-                    row
-                } else {
-                    col()
-                        .key("rows")
-                        .w_full()
-                        .gap(2.0)
-                        .growth(GrowthSpec::default())
-                        .virtual_rows(
-                            count,
-                            ROW_H,
-                            |s: &State, i| format!("row-{}", s.filtered[i]).into(),
-                            |s: &State, i| row_el(s, s.filtered[i]),
-                        )
-                }),
-        )
-        // Preview pane (toggle Ctrl+P).
-        .child(if s.preview_open {
-            let txt = if let Some(&idx) = s.filtered.get(s.cursor) {
-                if let Some(entry) = s.snapshot.entries.get(idx) {
-                    if let Some(path) = entry_path(&s.location, entry) {
-                        if path.is_file() {
-                            std::fs::read_to_string(&path)
-                                .map(|t| t.chars().take(1500).collect::<String>())
-                                .unwrap_or_else(|_| "[binary or unreadable]".to_string())
-                        } else {
-                            format!("[folder: {}]", path.display())
-                        }
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
-            col()
-                .key("preview")
-                .w_full()
-                .h(120.0)
-                .padding(8.0)
-                .radius(tokens::RADIUS_CONTROL)
-                .fill(surface())
-                .child(text(txt).font(type_::BODY).color(ink_secondary()))
-        } else {
-            col().key("preview-off").w_full().h(0.0)
-        })
-        // Status bar.
-        .child(
-            row()
-                .key("statusbar")
-                .w_full()
-                .h(22.0)
-                .px(6.0)
-                .center_y()
-                .child(
-                    text(if !s.status.is_empty() {
-                        s.status.clone()
-                    } else if !s.selected.is_empty() {
-                        let total_sel_size: u64 = s.selected.iter().filter_map(|&i| s.snapshot.entries.get(i)).map(|e| e.size).sum();
-                        format!("{} item(s) selected ({})", s.selected.len(), format_size(total_sel_size))
-                    } else if count == total {
-                        format!("{total} items in {}", location_label(&s.location))
-                    } else {
-                        format!("{count} of {total} items")
-                    })
-                    .key("status-msg")
-                    .font(type_::LABEL)
-                    .color(ink_secondary())
-                    .grow(1.0),
-                )
-                .child(
-                    row()
-                        .gap(10.0)
-                        .center_y()
-                        .child(
-                            text(if s.conflict_policy == 0 { "Conflicts: auto-rename" } else { "Conflicts: prompt" })
-                                .font(type_::LABEL)
-                                .color(ink_muted())
-                        )
-                        .child(
-                            text(if s.show_hidden { "Hidden: visible" } else { "" })
-                                .font(type_::LABEL)
-                                .color(accent())
-                        )
-                ),
-        )
-        // Properties dialog (Ctrl+I).
-        .child(if s.properties_path.is_some() {
-            let path = s.properties_path.clone().unwrap();
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string());
-            let size = s.properties_size;
-            let loading = s.properties_loading;
-            col()
-                .key("props-overlay")
-                .w_full()
-                .h_full()
-                .fill(modal_scrim())
-                .center()
-                .child(
-                    col()
-                        .key("props-card")
-                        .w(420.0)
-                        .padding(16.0)
-                        .gap(8.0)
-                        .radius(tokens::RADIUS_CARD)
-                        .fill(surface())
-                        .border(1.0, hairline())
-                        .child(text(format!("Properties: {}", name)).font(type_::TITLE).color(ink()))
-                        .child(text(format!("Location: {}", path.display())).font(type_::LABEL).color(ink_secondary()))
-                        .child(text(format!("Type: {}", if path.is_dir() { "Folder" } else { "File" })).font(type_::LABEL).color(ink_secondary()))
-                        .child(text(format!("MIME: {}", s.properties_mime.clone().unwrap_or_else(|| if loading { "detecting...".to_string() } else { "unknown".to_string() }))).font(type_::LABEL).color(ink_secondary()))
-                        .child(text(format!("Permissions: {}", props_permissions(&path))).font(type_::LABEL).color(ink_secondary()))
-                        .child(text(format!("Owner: {}", props_owner(&path))).font(type_::LABEL).color(ink_secondary()))
-                        .child(text(if loading {
-                            "Size: calculating...".to_string()
-                        } else if let Some(sz) = size {
-                            format!("Size: {}", format_size(sz))
-                        } else {
-                            "Size: unknown".to_string()
-                        }).font(type_::LABEL).color(ink_secondary()))
-                        .child(text(format!("Checksum: {}", s.properties_checksum.clone().unwrap_or_else(|| if loading { "calculating...".to_string() } else { "n/a".to_string() }))).font(type_::LABEL).color(ink_secondary()))
-                        .child(
-                            row().gap(8.0)
-                                .child(
-                                    el()
-                                        .key("props-close")
-                                        .label("Close properties")
-                                        .w(80.0).h(28.0)
-                                        .radius(tokens::RADIUS_CONTROL)
-                                        .fill(bg())
-                                        .center()
-                                        .child(text("Close").font(type_::BODY).color(ink()))
-                                        .on_press(|s: &mut State| {
-                                            s.properties_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                                            s.properties_path = None;
-                                        }),
-                                )
-                                .child(if loading {
-                                    el()
-                                        .key("props-cancel")
-                                        .label("Cancel properties")
-                                        .w(80.0).h(28.0)
-                                        .radius(tokens::RADIUS_CONTROL)
-                                        .fill(bg())
-                                        .center()
-                                        .child(text("Cancel").font(type_::BODY).color(ink()))
-                                        .on_press(|s: &mut State| {
-                                            s.properties_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                                            s.properties_loading = false;
-                                            s.status = "properties: cancelled".into();
-                                        })
-                                } else {
-                                    el().key("props-cancel-off").w(0.0).h(0.0)
-                                }),
-                        ),
-                )
-        } else {
-            col().key("props-off").w(0.0).h(0.0)
-        })
-        // Batch rename modal.
-        .child(if s.batch_rename_open {
-            let previews = batch_rename_preview(s);
-            col()
-                .key("batchrename-overlay")
-                .w_full()
-                .h_full()
-                .fill(modal_scrim())
-                .center()
-                .child(
-                    col()
-                        .key("batchrename-card")
-                        .w(460.0)
-                        .padding(16.0)
-                        .gap(8.0)
-                        .radius(tokens::RADIUS_CARD)
-                        .fill(surface())
-                        .border(1.0, hairline())
-                        .child(text("Batch Rename").font(type_::TITLE).color(ink()))
-                        .child(row().gap(4.0)
-                            .child(ctx_item("Replace", |_| {})) // placeholder spacer
-                        )
-                        .child(text("Mode: 0=replace 1=prefix 2=suffix 3=numbering").font(type_::LABEL).color(ink_secondary()))
-                        .child(text_input(&s.batch_rename_find, type_::BODY).key("br-find").on_edit(|s: &mut State| &mut s.batch_rename_find))
-                        .child(text_input(&s.batch_rename_replace, type_::BODY).key("br-repl").on_edit(|s: &mut State| &mut s.batch_rename_replace))
-                        .child(text_input(&s.batch_rename_prefix, type_::BODY).key("br-pref").on_edit(|s: &mut State| &mut s.batch_rename_prefix))
-                        .child(text_input(&s.batch_rename_suffix, type_::BODY).key("br-suff").on_edit(|s: &mut State| &mut s.batch_rename_suffix))
-                        .child(text(format!("Preview: {} items", previews.len())).font(type_::LABEL).color(ink_secondary()))
-                        .child(
-                            col().gap(2.0).children(previews.iter().take(8).map(|(_, n)| text(n.clone()).font(type_::BODY).color(ink())).collect::<Vec<_>>())
-                        )
-                        .child(row().gap(8.0)
-                            .child(el().key("br-apply").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL)
-                                .fill(accent()).center()
-                                .child(text("Apply").font(type_::BODY).color(Color::BLACK))
-                                .on_press(|s: &mut State| { apply_batch_rename(s); }))
-                            .child(el().key("br-cancel").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
-                                .child(text("Cancel").font(type_::BODY).color(ink()))
-                                .on_press(|s: &mut State| { s.batch_rename_open = false; })))
-                )
-        } else {
-            col().key("batchrename-off").w(0.0).h(0.0)
-        })
-        // Shortcuts overlay.
-        .child(if s.show_shortcuts {
-            col().key("shortcuts-overlay").w_full().h_full().fill(modal_scrim()).center().child(
-                col().key("shortcuts-card").w(520.0).padding(16.0).gap(6.0).radius(tokens::RADIUS_CARD).fill(surface()).border(1.0, hairline())
-                    .child(text("Keyboard Shortcuts").font(type_::TITLE).color(ink()))
-                    .child(col().gap(2.0).children({
-                        let help = keybinds_help();
-                        s.keybinds.iter().map(|(action, kb)| {
-                            let desc = help.iter().find(|(a, _, _)| a == action).map(|(_, _, d)| *d).unwrap_or("");
-                            row().gap(8.0)
-                                .child(text(kb.clone()).font(type_::LABEL).color(accent()).w(120.0))
-                                .child(text(desc.to_string()).font(type_::LABEL).color(ink_secondary()))
-                        }).collect::<Vec<_>>()
-                    }))
-                    .child(text("Customize: ~/.config/clove/keybinds.txt").font(type_::LABEL).color(ink_muted()))
-                    .child(el().key("sc-close").label("Close shortcuts").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
-                        .child(text("Close").font(type_::BODY).color(ink()))
-                        .on_press(|s: &mut State| { s.show_shortcuts = false; }))
-            )
-        } else { col().key("shortcuts-off").w(0.0).h(0.0) })
-        // Open With modal.
-        .child(if s.open_with_open {
-            col()
-                .key("openwith-overlay")
-                .w_full()
-                .h_full()
-                .fill(modal_scrim())
-                .center()
-                .child(
-                    col()
-                        .key("openwith-card")
-                        .w(320.0)
-                        .padding(16.0)
-                        .gap(6.0)
-                        .radius(tokens::RADIUS_CARD)
-                        .fill(surface())
-                        .border(1.0, hairline())
-                        .child(text("Open With").font(type_::TITLE).color(ink()))
-                        .child(if s.open_with_apps.is_empty() {
-                            text("No applications found").font(type_::LABEL).color(ink_secondary())
-                        } else {
-                            let apps = s.open_with_apps.clone();
-                            let target = s.open_with_path.clone();
-                            col().gap(2.0).children(apps.into_iter().map(|(name, desktop)| {
-                                let d = desktop.clone();
-                                let target2 = target.clone();
-                                let name2 = name.clone();
-                                el()
-                                    .key(format!("ow-{}", name))
-                                    .w_full()
-                                    .h(24.0)
-                                    .px(8.0)
-                                    .center_y()
-                                    .radius(tokens::RADIUS_CONTROL)
-                                    .child(text(name).font(type_::BODY).color(ink()))
-                                    .on_press(move |s: &mut State| {
-                                        if let Some(p) = &target2 {
-                                            launch_desktop_app(&d, p);
-                                            s.status = format!("opened with {}", name2);
-                                        }
-                                        s.open_with_open = false;
-                                    })
-                            }).collect::<Vec<_>>())
-                        })
-                        .child(el().key("ow-close").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
-                            .child(text("Close").font(type_::BODY).color(ink()))
-                            .on_press(|s: &mut State| { s.open_with_open = false; }))
-                )
-        } else {
-            col().key("openwith-off").w(0.0).h(0.0)
-        })
-        // Conflict resolution modal.
-        .child(if s.pending_paste.is_some() {
-            let (target, paths, _cut) = s.pending_paste.clone().unwrap();
-            let collisions: Vec<String> = paths.iter().filter_map(|src| {
-                let name = src.file_name()?.to_string_lossy().to_string();
-                if target.join(&name).exists() { Some(name) } else { None }
-            }).collect();
-            col()
-                .key("conflict-overlay")
-                .w_full()
-                .h_full()
-                .fill(modal_scrim())
-                .center()
-                .child(
-                    col()
-                        .key("conflict-card")
-                        .w(360.0)
-                        .padding(16.0)
-                        .gap(8.0)
-                        .radius(tokens::RADIUS_CARD)
-                        .fill(surface())
-                        .border(1.0, hairline())
-                        .child(text("Resolve Conflicts").font(type_::TITLE).color(ink()))
-                        .child(text(format!("{} item(s) collide", collisions.len())).font(type_::LABEL).color(ink_secondary()))
-                        .child(col().gap(2.0).children(collisions.into_iter().take(6).map(|n| text(n).font(type_::BODY).color(ink())).collect::<Vec<_>>()))
-                        .child(row().gap(6.0)
-                            .child(el().key("cf-replace").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(accent()).center()
-                                .child(text("Replace").font(type_::BODY).color(Color::BLACK))
-                                .on_press(move |s: &mut State| {
-                                    let (t, p, c) = s.pending_paste.take().unwrap();
-                                    run_paste(s, t, p, c, 1);
-                                }))
-                            .child(el().key("cf-skip").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
-                                .child(text("Skip").font(type_::BODY).color(ink()))
-                                .on_press(move |s: &mut State| {
-                                    let (t, p, c) = s.pending_paste.take().unwrap();
-                                    run_paste(s, t, p, c, 2);
-                                }))
-                            .child(el().key("cf-rename").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
-                                .child(text("Rename").font(type_::BODY).color(ink()))
-                                .on_press(move |s: &mut State| {
-                                    let (t, p, c) = s.pending_paste.take().unwrap();
-                                    run_paste(s, t, p, c, 0);
-                                }))
-                        )
-                        .child(el().key("cf-cancel").w(80.0).h(28.0).radius(tokens::RADIUS_CONTROL).fill(bg()).center()
-                            .child(text("Cancel").font(type_::BODY).color(ink()))
-                            .on_press(|s: &mut State| { s.pending_paste = None; s.status = "cancelled".into(); }))
-                )
-        } else {
-            col().key("conflict-off").w(0.0).h(0.0)
-        })
-        // Context menu (right-click).
-        .child(if s.context_menu.is_some() {
-            let idx = s.context_menu.unwrap();
-            col()
-                .key("ctx-overlay")
-                .w_full()
-                .h_full()
-                .center()
-                .child(
-                    col()
-                        .key("ctx-card")
-                        .w(220.0)
-                        .padding(8.0)
-                        .gap(4.0)
-                        .radius(tokens::RADIUS_CONTROL)
-                        .fill(surface())
-                        .border(1.0, hairline())
-                        .child(ctx_item("Open", move |s: &mut State| {
-                            if let Some(entry) = s.snapshot.entries.get(idx) {
-                                if let Some(path) = entry_path(&s.location, entry) {
-                                    if entry.is_dir {
-                                        navigate(s, Location::Folder(path));
-                                        sync_address(s);
-                                    } else {
-                                        platform::open_path(&path);
-                                        s.status = format!("opening {}", entry.name);
-                                    }
-                                }
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Open With...", move |s: &mut State| {
-                            if let Some(entry) = s.snapshot.entries.get(idx) {
-                                if let Some(path) = entry_path(&s.location, entry) {
-                                    let apps = open_with_candidates(&path);
-                                    s.open_with_path = Some(path);
-                                    s.open_with_apps = apps;
-                                    s.open_with_open = true;
-                                }
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Copy", move |s: &mut State| {
-                            if let Some(entry) = s.snapshot.entries.get(idx) {
-                                if let Some(path) = entry_path(&s.location, entry) {
-                                    s.clipboard = vec![path.clone()];
-                                    s.clipboard_cut = false;
-                                    let p2 = path.clone();
-                                    std::thread::spawn(move || { if let Ok(mut cb) = arboard::Clipboard::new() { let _ = cb.set().file_list(&[p2]); } });
-                                    s.status = "copied 1 item".into();
-                                }
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Cut", move |s: &mut State| {
-                            if let Some(entry) = s.snapshot.entries.get(idx) {
-                                if let Some(path) = entry_path(&s.location, entry) {
-                                    s.clipboard = vec![path.clone()];
-                                    s.clipboard_cut = true;
-                                    let p2 = path.clone();
-                                    std::thread::spawn(move || { if let Ok(mut cb) = arboard::Clipboard::new() { let _ = cb.set().file_list(&[p2]); } });
-                                    s.status = "cut 1 item".into();
-                                }
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Paste", move |s: &mut State| {
-                            do_paste(s);
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Reveal in Folder", move |s: &mut State| {
-                            let mut parent_opt = None;
-                            let mut name = String::new();
-                            if let Some(entry) = s.snapshot.entries.get(idx) {
-                                if let Some(path) = entry_path(&s.location, entry) {
-                                    if let Some(parent) = path.parent() {
-                                        parent_opt = Some(parent.to_path_buf());
-                                        name = entry.name.clone();
-                                    }
-                                }
-                            }
-                            if let Some(parent) = parent_opt {
-                                navigate(s, Location::Folder(parent));
-                                sync_address(s);
-                                s.status = format!("revealed {}", name);
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Copy Path", move |s: &mut State| {
-                            if let Some(entry) = s.snapshot.entries.get(idx) {
-                                if let Some(path) = entry_path(&s.location, entry) {
-                                    let text = path.to_string_lossy().to_string();
-                                    std::thread::spawn(move || { if let Ok(mut cb) = arboard::Clipboard::new() { let _ = cb.set_text(text); } });
-                                    s.status = "path copied".into();
-                                }
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("New File", move |s: &mut State| {
-                            if let Location::Folder(root) = s.location.clone() {
-                                let mut name = "New file".to_string();
-                                let mut n = 1u32;
-                                while root.join(&name).exists() { n += 1; name = format!("New file {n}"); }
-                                let dest = root.join(&name);
-                                match std::fs::OpenOptions::new().write(true).create_new(true).open(&dest) {
-                                    Ok(_) => { s.status = format!("created {name}"); reload(s); }
-                                    Err(_) => { s.status = "could not create file".into(); }
-                                }
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("New Folder", move |s: &mut State| {
-                            if let Location::Folder(root) = s.location.clone() {
-                                let mut name = "New folder".to_string();
-                                let mut n = 1u32;
-                                while root.join(&name).exists() { n += 1; name = format!("New folder {n}"); }
-                                let dest = root.join(&name);
-                                match std::fs::create_dir(&dest) {
-                                    Ok(_) => { s.status = format!("created {name}"); reload(s); }
-                                    Err(_) => { s.status = "could not create folder".into(); }
-                                }
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Terminal Here", move |s: &mut State| {
-                            let dir = match &s.location {
-                                Location::Folder(d) => d.clone(),
-                                Location::ThisPc => platform::home_dir(),
-                            };
-                            platform::open_terminal_here(&dir);
-                            s.status = "opening terminal".into();
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Delete", move |s: &mut State| {
-                            if let Some(e) = s.snapshot.entries.get(idx) {
-                                if let Some(p) = entry_path(&s.location, e) {
-                                    let root = match &s.location { Location::Folder(d) => d.clone(), _ => { s.context_menu = None; return; } };
-                                    let name = e.name.clone();
-                                    let handle = s.handle.clone();
-                                    std::thread::spawn(move || {
-                                        let outcome = clove_shell::trash(&p, &root, false);
-                                        handle.update(move |s, _| {
-                                            if !outcome.moves.is_empty() {
-                                                s.undo_stack.push(UndoAction::Trash { moves: outcome.moves });
-                                                s.status = format!("moved {name} to Trash · Ctrl+Z to undo");
-                                            }
-                                            reload(s);
-                                        });
-                                    });
-                                }
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Rename (F2)", move |s: &mut State| {
-                            s.renaming = Some(idx);
-                            if let Some(e) = s.snapshot.entries.get(idx) {
-                                s.rename_text = TextEdit::new(&e.name);
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Batch Rename...", move |s: &mut State| {
-                            s.batch_rename_open = true;
-                            s.batch_rename_find = TextEdit::new("");
-                            s.batch_rename_replace = TextEdit::new("");
-                            s.batch_rename_prefix = TextEdit::new("");
-                            s.batch_rename_suffix = TextEdit::new("");
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Compress", move |s: &mut State| {
-                            // Collect selected paths (or cursor).
-                            let mut paths = Vec::new();
-                            for &idx in &s.selected {
-                                if let Some(e) = s.snapshot.entries.get(idx) {
-                                    if let Some(p) = entry_path(&s.location, e) { paths.push(p); }
-                                }
-                            }
-                            if paths.is_empty() {
-                                if let Some(entry) = s.snapshot.entries.get(idx) {
-                                    if let Some(p) = entry_path(&s.location, entry) { paths.push(p); }
-                                }
-                            }
-                            if !paths.is_empty() {
-                                let target = match &s.location { Location::Folder(d) => d.clone(), _ => PathBuf::from(".") };
-                                let name = paths.first().and_then(|p| p.file_name()).map(|n| format!("{}.tar.gz", n.to_string_lossy())).unwrap_or_else(|| "archive.tar.gz".into());
-                                let dest = target.join(name);
-                                let handle = s.handle.clone();
-                                s.op_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-                                let cancel = s.op_cancel.clone();
-                                s.op_progress = Some(FileOpProgress { label: "Compressing".into(), done: 0, total: 0, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
-                                std::thread::spawn(move || {
-                                    let total = paths.iter().map(|p| count_files(p)).sum::<usize>().max(1);
-                                    handle.update(move |s, _| {
-                                        if let Some(op) = &mut s.op_progress { op.total = total; }
-                                    });
-                                    let mut args = vec!["czvf".to_string(), dest.to_string_lossy().to_string()];
-                                    for p in &paths { args.push(p.to_string_lossy().to_string()); }
-                                    let mut cmd = std::process::Command::new("tar");
-                                    cmd.args(&args);
-                                    let ok = run_progress(&mut cmd, &cancel, &handle);
-                                    let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
-                                    handle.update(move |s, _| {
-                                        s.op_progress = None;
-                                        s.status = if cancelled { "compress cancelled".into() } else if ok { "compressed".into() } else { "compress failed".into() };
-                                        reload(s);
-                                    });
-                                });
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Extract Here", move |s: &mut State| {
-                            if let Some(entry) = s.snapshot.entries.get(idx) {
-                                if let Some(path) = entry_path(&s.location, entry) {
-                                    let lower = path.to_string_lossy().to_lowercase();
-                                    let is_archive = lower.ends_with(".zip") || lower.ends_with(".tar.gz") || lower.ends_with(".tgz") || lower.ends_with(".tar") || lower.ends_with(".tar.bz2") || lower.ends_with(".tar.xz") || lower.ends_with(".7z");
-                                    if is_archive {
-                                        let target = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
-                                        let handle = s.handle.clone();
-                                        let p = path.clone();
-                                        s.op_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-                                        let cancel = s.op_cancel.clone();
-                                        s.op_progress = Some(FileOpProgress { label: "Extracting".into(), done: 0, total: 0, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
-                                        std::thread::spawn(move || {
-                                            let total = archive_entry_count(&p);
-                                            handle.update(move |s, _| {
-                                                if let Some(op) = &mut s.op_progress { op.total = total; }
-                                            });
-                                            let mut cmd = if p.to_string_lossy().ends_with(".zip") {
-                                                let mut c = std::process::Command::new("unzip");
-                                                c.args(["-o", &p.to_string_lossy(), "-d", &target.to_string_lossy()]);
-                                                c
-                                            } else {
-                                                let mut c = std::process::Command::new("tar");
-                                                c.args(["xvf", &p.to_string_lossy(), "-C", &target.to_string_lossy()]);
-                                                c
-                                            };
-                                            let ok = run_progress(&mut cmd, &cancel, &handle);
-                                            let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
-                                            handle.update(move |s, _| {
-                                                s.op_progress = None;
-                                                s.status = if cancelled { "extract cancelled".into() } else if ok { "extracted".into() } else { "extract failed".into() };
-                                                reload(s);
-                                            });
-                                        });
-                                    } else {
-                                        s.status = "not an archive".into();
-                                    }
-                                }
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Copy Checksums", move |s: &mut State| {
-                            let mut paths = Vec::new();
-                            for &i2 in &s.selected { if let Some(e) = s.snapshot.entries.get(i2) { if let Some(p) = entry_path(&s.location, e) { if p.is_file() { paths.push(p); } } } }
-                            if paths.is_empty() { if let Some(e) = s.snapshot.entries.get(idx) { if let Some(p) = entry_path(&s.location, e) { if p.is_file() { paths.push(p); } } } }
-                            let handle = s.handle.clone();
-                            s.status = "checksumming...".into();
-                            std::thread::spawn(move || {
-                                let mut lines = Vec::new();
-                                for p in &paths { if let Some(h) = file_checksum(p) { lines.push(format!("{}  {}", h, p.display())); } }
-                                let report = lines.join("\n");
-                                handle.update(move |s, _| {
-                                    if let Ok(mut cb) = arboard::Clipboard::new() { let _ = cb.set_text(report.clone()); }
-                                    s.status = format!("{} checksums copied", lines.len());
-                                });
-                            });
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Find Duplicates", move |s: &mut State| {
-                            let root = match &s.location { Location::Folder(d) => d.clone(), _ => { s.status = "open a folder first".into(); s.context_menu = None; return; } };
-                            let handle = s.handle.clone();
-                            s.op_progress = Some(FileOpProgress { label: "Scanning dupes".into(), done: 0, total: 1, bytes_done: 0, bytes_total: 0, failures: 0, cancelled: false });
-                            std::thread::spawn(move || {
-                                let dups = find_duplicates(&root);
-                                let groups = dups.len();
-                                let files: usize = dups.iter().map(|(_, g)| g.len()).sum();
-                                handle.update(move |s, _| {
-                                    s.op_progress = None;
-                                    s.status = format!("duplicates: {} groups, {} files", groups, files);
-                                });
-                            });
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Compare Folders", move |s: &mut State| {
-                            let mut dirs: Vec<PathBuf> = Vec::new();
-                            for &i2 in &s.selected { if let Some(e) = s.snapshot.entries.get(i2) { if e.is_dir { if let Some(p) = entry_path(&s.location, e) { dirs.push(p); } } } }
-                            if dirs.len() == 2 {
-                                let a = dirs[0].clone(); let b = dirs[1].clone();
-                                let handle = s.handle.clone();
-                                s.status = "comparing...".into();
-                                std::thread::spawn(move || {
-                                    let (oa, ob, diff) = compare_dirs(&a, &b);
-                                    handle.update(move |s, _| { s.status = format!("compare: only A {}, only B {}, different {}", oa, ob, diff); });
-                                });
-                            } else {
-                                s.status = "select exactly 2 folders".into();
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Create Symlink", move |s: &mut State| {
-                            if let Some(entry) = s.snapshot.entries.get(idx) {
-                                if let Some(path) = entry_path(&s.location, entry) {
-                                    if let Some(parent) = path.parent() {
-                                        let dest = unique_link_path(parent, &path, "symlink");
-                                        let res = create_symlink(&path, &dest);
-                                        s.status = if res { "symlink created".into() } else { "symlink failed".into() };
-                                        reload(s);
-                                    }
-                                }
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Create Hardlink", move |s: &mut State| {
-                            if let Some(entry) = s.snapshot.entries.get(idx) {
-                                if let Some(path) = entry_path(&s.location, entry) {
-                                    if path.is_file() {
-                                        if let Some(parent) = path.parent() {
-                                            let dest = unique_link_path(parent, &path, "hardlink");
-                                            let res = std::fs::hard_link(&path, &dest).is_ok();
-                                            s.status = if res { "hardlink created".into() } else { "hardlink failed".into() };
-                                            reload(s);
-                                        }
-                                    } else { s.status = "hardlink: files only".into(); }
-                                }
-                            }
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Properties", move |s: &mut State| {
-                            open_properties(s);
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Toggle Conflict Policy", move |s: &mut State| {
-                            s.conflict_policy = if s.conflict_policy == 0 { 1 } else { 0 };
-                            s.status = if s.conflict_policy == 0 { "conflicts: auto-rename".into() } else { "conflicts: ask".into() };
-                            s.context_menu = None;
-                        }))
-                        .child(ctx_item("Close", move |s: &mut State| {
-                            s.context_menu = None;
-                        })),
-                )
-        } else {
-            col().key("ctx-off").w(0.0).h(0.0)
-        })
-        )
-}
-
-// ---------------------------------------------------------------- main
+// UI lives in ui.rs and icons.rs
 
 fn settings_path() -> Option<PathBuf> {
     #[cfg(windows)]
@@ -4277,6 +2438,9 @@ fn save_tabs(s: &State) {
         for loc in &s.tabs {
             match loc {
                 Location::ThisPc => lines.push("thispc".to_string()),
+                Location::Recent => lines.push("recent".to_string()),
+                Location::Starred => lines.push("starred".to_string()),
+                Location::Network => lines.push("network".to_string()),
                 Location::Folder(p) => lines.push(p.to_string_lossy().to_string()),
             }
         }
@@ -4293,6 +2457,12 @@ fn load_tabs() -> Vec<Location> {
         if line.is_empty() { continue; }
         if line.eq_ignore_ascii_case("thispc") {
             out.push(Location::ThisPc);
+        } else if line.eq_ignore_ascii_case("recent") {
+            out.push(Location::Recent);
+        } else if line.eq_ignore_ascii_case("starred") {
+            out.push(Location::Starred);
+        } else if line.eq_ignore_ascii_case("network") {
+            out.push(Location::Network);
         } else {
             let p = PathBuf::from(line);
             if p.exists() { out.push(Location::Folder(p)); }
@@ -4420,10 +2590,7 @@ fn build_state(handle: AppHandle<State>) -> State {
     let filtered: Vec<usize> = (0..initial_snapshot.entries.len())
         .filter(|&i| show_hidden || !(initial_snapshot.entries[i].hidden || initial_snapshot.entries[i].system))
         .collect();
-    let mut selected = std::collections::HashSet::new();
-    if let Some(&i) = filtered.first() {
-        selected.insert(i);
-    }
+    let selected = std::collections::HashSet::new();
 
     let generation = Arc::new(AtomicU64::new(1));
     let watcher_gen = generation.clone();
@@ -4516,15 +2683,31 @@ fn build_state(handle: AppHandle<State>) -> State {
         bar_width: 936.0,
         ui_scale: 2.0,
         storage_bar_open: true,
-        system_icons: load_system_icons(),
+        storage_expanded: false,
+        win_width: 1180.0,
+        icon_size: 96.0,
+        main_menu_open: false,
+        view_menu_open: false,
+        path_menu_open: false,
+        focus_target: None,
+        starred: load_starred(),
+        virtual_paths: Vec::new(),
+        system_icons: icons::load_system_icons(),
     }
 }
 
 fn main() {
+    rune::set_app_id("clove");
     let app = App::new(AppSpec {
         poll: Some(poll),
         on_key: Some(handle_key),
-        ..AppSpec::new("Clove", (960.0, 680.0), || unreachable!(), view)
+        families: ("Adwaita Sans, Inter, sans-serif", "Adwaita Mono, monospace"),
+        ..AppSpec::new("Clove", (1180.0, 740.0), || unreachable!(), ui::view)
+    })
+    .window_options(rune::WindowOptions {
+        transparent: cfg!(target_os = "linux"),
+        borderless: cfg!(target_os = "linux"),
+        ..Default::default()
     });
     let handle = app.handle();
     let app = app.init({

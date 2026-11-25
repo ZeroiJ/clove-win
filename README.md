@@ -116,6 +116,7 @@ cargo test -p clove-fs -p clove-search -p clove-render -p clove-shell
 
 - [Clove](https://github.com/keshav-exe/clove) by keshav-exe — the macOS app whose storage view and file browsing inspired this port. MIT licensed.
 - [Rune](https://github.com/rune-rs/rune) — the Rust GPU UI framework the app is built on.
+- the icon was taken from here :- https://pin.it/ygCGJ3lxo
 
 ## License
 
