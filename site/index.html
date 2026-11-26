@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en" data-scheme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Clove for Linux — Fast Rust file manager with a dithered storage dock.</title>
+  <meta name="description" content="Clove for Linux (clove-linux): standalone Rust file manager for Arch &amp; Omarchy on Wayland and Vulkan. Inspired by GNOME Files and Keshav Bagaade's Clove." />
+  <link rel="icon" type="image/png" href="assets/favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <a class="brand" href="#top" aria-label="Clove for Linux home">
+        <img class="brand-icon" src="assets/clove-icon.png" alt="" width="20" height="20" />
+        <span class="brand-word">CLOVE</span>
+      </a>
+    </div>
+
+    <div class="topbar-right">
+      <div class="topbar-pattern" aria-hidden="true"></div>
+      <a class="nav-cell nav-cell-desktop" href="#specimen">BAR</a>
+      <a class="nav-cell nav-cell-desktop" href="#install">INSTALL</a>
+      <a class="nav-cell nav-cell-desktop" href="#credits">CREDITS</a>
+      <a class="nav-cell" href="https://github.com/ZeroiJ/clove-win" target="_blank" rel="noopener noreferrer" aria-label="Clove on GitHub">
+        <svg class="gh-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+        </svg>
+        <span>1.6.2</span>
+      </a>
+      <button type="button" id="theme-toggle" class="nav-cell nav-btn" aria-label="Switch color scheme">DARK</button>
+      <a class="nav-cell nav-cell-cta" href="https://aur.archlinux.org/packages/clove-linux" target="_blank" rel="noopener noreferrer">AUR</a>
+    </div>
+  </header>
+
+  <main id="main">
+    <section id="top" class="hero-wrap">
+      <div class="col hero-head">
+        <p class="hero-kicker">Free and open source &middot; MIT License &middot; Arch &amp; Omarchy</p>
+        <h1 class="hero-title">Browse your filesystem without opening five terminal tabs.</h1>
+
+        <div class="hero-actions">
+          <button type="button" id="copy-aur-btn" class="action-btn action-btn-solid" data-cmd="yay -S clove-linux">
+            <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="4 17 10 11 4 5"/>
+              <line x1="12" x2="20" y1="19" y2="19"/>
+            </svg>
+            <span id="copy-aur-label">yay -S clove-linux</span>
+          </button>
+
+          <a class="action-btn action-btn-outline" href="https://github.com/ZeroiJ/clove-win/releases/latest/download/clove-arch.tar.gz">
+            <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" x2="12" y1="15" y2="3"/>
+            </svg>
+            <span>Download Arch Tarball</span>
+            <span class="btn-tag">v1.6.2</span>
+          </a>
+
+          <a class="action-btn action-btn-outline" href="#install">
+            <span>Build from source</span>
+          </a>
+        </div>
+
+        <p class="hero-sub">
+          Also available via <button type="button" id="copy-paru-btn" class="text-btn" data-cmd="paru -S clove-linux">paru -S clove-linux</button>. Originally created for macOS by
+          <a href="https://github.com/keshav-exe/clove" target="_blank" rel="noopener noreferrer">Keshav Bagaade</a>.
+        </p>
+        <p class="sr-only" id="copy-live" aria-live="polite"></p>
+      </div>
+
+      <div class="hero-stage">
+        <div class="stripe-field" aria-hidden="true">
+          <canvas id="hero-stripes"></canvas>
+        </div>
+        <div class="col stage-frame-wrap">
+          <figure class="app-window">
+            <img
+              src="assets/clove-linux-preview.png"
+              alt="Clove for Linux running natively on Arch/Omarchy with Yaru red folder icons, centered Nautilus location bar, and the 44px Bayer-dithered storage dock."
+              width="1180"
+              height="740"
+            />
+          </figure>
+        </div>
+      </div>
+
+      <div class="col origin-ribbon">
+        <span class="ribbon-label">ORIGINALLY BY</span>
+        <a class="ribbon-credit" href="https://github.com/keshav-exe/clove" target="_blank" rel="noopener noreferrer">
+          <img src="assets/clove-icon.png" alt="" width="18" height="18" class="ribbon-avatar" />
+          <strong>Keshav Bagaade</strong>
+          <span>&middot; kshv.me/clove (MIT)</span>
+        </a>
+      </div>
+    </section>
+
+    <!-- 2x2 Architectural Grid (Dray grammar, authentic Clove Linux internals) -->
+    <section class="section col">
+      <div class="arch-grid">
+        <article class="arch-cell">
+          <div class="cell-stage">
+            <div class="mini-window">
+              <div class="mini-pathbar">
+                <span class="mini-crumb-home">Home</span>
+                <span class="mini-sep">/</span>
+                <span>Projects</span>
+                <span class="mini-sep">/</span>
+                <span class="mini-crumb-active">clove-win</span>
+                <span class="mini-key">Ctrl+L</span>
+              </div>
+              <div class="mini-list">
+                <div class="mini-row is-selected">
+                  <span class="mini-folder"></span>
+                  <span class="mini-name">clove-rs</span>
+                  <span class="mini-meta">dir &middot; 6 crates</span>
+                </div>
+                <div class="mini-row">
+                  <span class="mini-folder"></span>
+                  <span class="mini-name">packaging</span>
+                  <span class="mini-meta">AUR + Arch</span>
+                </div>
+                <div class="mini-row">
+                  <span class="mini-file"></span>
+                  <span class="mini-name">CHANGELOG.md</span>
+                  <span class="mini-meta">3.1 KB</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p class="cell-caption">Breadcrumb paths, editable <code>Ctrl+L</code> navigation, and instant <code>Ctrl+F</code> filtering.</p>
+        </article>
+
+        <article class="arch-cell">
+          <div class="cell-stage">
+            <div class="mini-window">
+              <div class="mini-gtk-head">SYSTEM THEME &amp; MOUNTS</div>
+              <div class="mini-kv"><span>Icon theme</span><code>Yaru-red &rarr; Adwaita</code></div>
+              <div class="mini-kv"><span>Bookmarks</span><code>~/.config/gtk-3.0</code></div>
+              <div class="mini-kv"><span>Block devices</span><code>/proc/self/mountinfo</code></div>
+              <div class="mini-kv"><span>Side locations</span><code>Starred &middot; Recent &middot; Trash</code></div>
+            </div>
+          </div>
+          <p class="cell-caption">Picks up your Omarchy Yaru icons, GTK bookmarks, and real kernel mounts automatically.</p>
+        </article>
+
+        <article class="arch-cell">
+          <div class="cell-stage">
+            <div class="mini-window">
+              <div class="mini-gtk-head">SAFE OPS &amp; CHECKSUMS</div>
+              <div class="mini-op-row"><span>Move to Trash</span><kbd>Delete</kbd></div>
+              <div class="mini-op-row"><span>Put back (receipt)</span><kbd>Ctrl+Z</kbd></div>
+              <div class="mini-op-row"><span>SHA-256 &amp; MIME</span><kbd>Ctrl+I</kbd></div>
+              <div class="mini-op-row"><span>View (Details / List / Grid)</span><kbd>Ctrl+1 2 3</kbd></div>
+            </div>
+          </div>
+          <p class="cell-caption">Reversible XDG Trash with path-escape guards, conflict prompts, and SHA-256 inspection.</p>
+        </article>
+
+        <article class="arch-cell">
+          <div class="cell-stage">
+            <div class="mini-window mini-window-metrics">
+              <div class="mini-gtk-head">RENDERER &amp; WORKER BUDGET</div>
+              <div class="mini-stat-line">
+                <strong>0%</strong>
+                <span>CPU once settled (no background repaint)</span>
+              </div>
+              <div class="mini-stat-line">
+                <strong>0.29 ms</strong>
+                <span>Pre-folded filter over 4,700 entries</span>
+              </div>
+              <div class="mini-stat-line">
+                <strong>30 min</strong>
+                <span>Disk scan cache across 3 worker threads</span>
+              </div>
+            </div>
+          </div>
+          <p class="cell-caption">Built directly on Wayland + Vulkan via Rune. Zero Electron, zero background polling.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- Cobalt Blue Statement + Pixel Matrix (adapted from Dray proof band) -->
+    <section class="section col">
+      <div class="statement-block">
+        <div class="cobalt-banner">
+          <p class="cobalt-quote">
+            &ldquo;Nautilus ergonomics without the toolkit sluggishness. One standalone Rust binary with a real-time Bayer 4&times;4 disk scanner docked cleanly along the bottom.&rdquo;
+          </p>
+          <div class="cobalt-author">
+            <img src="assets/clove-icon.png" alt="" width="28" height="28" class="cobalt-avatar" />
+            <div>
+              <div class="cobalt-name">CLOVE-LINUX &middot; V1.6.2</div>
+              <div class="cobalt-sub">WAYLAND + VULKAN &middot; ZEROIJ PORT OF KESHAV&rsquo;S CLOVE</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="matrix-split">
+          <div class="matrix-cell">
+            <div class="dot-grid dot-grid-muted" aria-hidden="true"></div>
+            <div class="matrix-num">4,700</div>
+            <div class="matrix-label">Directory entries filtered inline in 0.29 ms using case-folded names.</div>
+          </div>
+          <div class="matrix-cell">
+            <div class="dot-grid dot-grid-cobalt" aria-hidden="true"></div>
+            <div class="matrix-num">44 px</div>
+            <div class="matrix-label">Bayer 4&times;4 dithered disk dock across 9 categories, cached for instant relaunches.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Editorial split headline + Live Interactive Bayer 4x4 Specimen -->
+    <section id="specimen" class="section col">
+      <div class="editorial-head">
+        <h2>
+          See where every gigabyte goes.
+          <span class="editorial-muted">Ordered 4&times;4 Bayer dithering, drifting value-noise clouds, and subtle glints — hover any category or switch disk profiles below.</span>
+        </h2>
+      </div>
+
+      <div class="specimen-box">
+        <div class="specimen-bar-top">
+          <div class="specimen-left">
+            <span class="specimen-title">Storage</span>
+            <span id="bar-summary-stat" class="specimen-stat">227.1 GB / 509.9 GB (45%)</span>
+          </div>
+          <div class="specimen-controls">
+            <div class="profile-switch" role="group" aria-label="Sample disk profiles">
+              <button type="button" class="prof-btn is-active" data-profile="workstation">Workstation</button>
+              <button type="button" class="prof-btn" data-profile="rustdev">Rust Dev</button>
+              <button type="button" class="prof-btn" data-profile="media">Media Vault</button>
+            </div>
+            <button type="button" id="toggle-anim" class="prof-btn" aria-pressed="true">Pause</button>
+          </div>
+        </div>
+
+        <div class="specimen-canvas-frame">
+          <canvas id="bayer-bar" height="88" aria-label="Interactive Bayer 4x4 dithered disk usage bar"></canvas>
+        </div>
+
+        <div class="specimen-bottom">
+          <ul id="bar-legend" class="bar-legend" aria-label="Storage breakdown by kind"></ul>
+          <span id="bar-hover-readout" class="specimen-hover">Hover any kind to isolate</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Install & Shortcuts Split Architecture -->
+    <section id="install" class="section col">
+      <div class="editorial-head">
+        <h2>
+          Install once, update via AUR.
+          <span class="editorial-muted">Every tagged release builds and pushes <code>clove-linux</code> straight to the Arch User Repository.</span>
+        </h2>
+      </div>
+
+      <div class="arch-two-col">
+        <div class="arch-panel">
+          <div class="panel-kicker">ARCH LINUX / OMARCHY</div>
+          <div class="cmd-block">
+            <div class="cmd-label">AUR Helper</div>
+            <pre><code>yay -S clove-linux
+# or
+paru -S clove-linux</code></pre>
+          </div>
+          <div class="cmd-block">
+            <div class="cmd-label">Build from source (requires pinned Rune)</div>
+            <pre><code>git clone https://github.com/ZeroiJ/clove-win.git \
+  &amp;&amp; cd clove-win
+git clone --depth 1 https://github.com/anomalyco/rune.git \
+  prototypes/_rune-upstream
+git -C prototypes/_rune-upstream fetch --depth 1 \
+  origin db301c06ab0d68b70c4822a542fffc6615bbd419
+git -C prototypes/_rune-upstream checkout \
+  db301c06ab0d68b70c4822a542fffc6615bbd419
+./scripts/install-arch.sh</code></pre>
+          </div>
+          <p class="panel-footnote">Runtime packages: <code>gcc-libs</code>, <code>fontconfig</code>, <code>libxkbcommon</code>, <code>wayland</code>, <code>vulkan-icd-loader</code>.</p>
+        </div>
+
+        <div class="arch-panel">
+          <div class="panel-kicker">KEYBOARD SHORTCUTS (<kbd>Ctrl</kbd>+<kbd>/</kbd> TO CUSTOMIZE)</div>
+          <dl class="kbd-table">
+            <div class="kbd-row"><dt><kbd>Ctrl</kbd>+<kbd>F</kbd> / Type</dt><dd>Filter current directory</dd></div>
+            <div class="kbd-row"><dt><kbd>Ctrl</kbd>+<kbd>L</kbd></dt><dd>Edit path bar</dd></div>
+            <div class="kbd-row"><dt><kbd>Ctrl</kbd>+<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Details / List / Grid</dd></div>
+            <div class="kbd-row"><dt><kbd>Ctrl</kbd>+<kbd>T</kbd> / <kbd>Ctrl</kbd>+<kbd>W</kbd></dt><dd>New tab / Close tab</dd></div>
+            <div class="kbd-row"><dt><kbd>Ctrl</kbd>+<kbd>H</kbd> / <kbd>F7</kbd></dt><dd>Toggle hidden files</dd></div>
+            <div class="kbd-row"><dt><kbd>F2</kbd> / <kbd>Ctrl</kbd>+<kbd>I</kbd></dt><dd>Rename / SHA-256 Properties</dd></div>
+            <div class="kbd-row"><dt><kbd>Delete</kbd> / <kbd>Ctrl</kbd>+<kbd>Z</kbd></dt><dd>Trash / Restore receipt</dd></div>
+            <div class="kbd-row"><dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd></dt><dd>New folder</dd></div>
+          </dl>
+        </div>
+      </div>
+    </section>
+
+    <!-- Origins & Credits Strip (Dray provider strip architecture + cobalt pixel corner) -->
+    <section id="credits" class="section col">
+      <div class="editorial-head editorial-head-row">
+        <h2>
+          Built on open work.
+          <span class="editorial-muted">Originally created by Keshav Bagaade for macOS; ported and adapted for Linux.</span>
+        </h2>
+        <div class="corner-dither" aria-hidden="true"></div>
+      </div>
+
+      <div class="credits-strip">
+        <a class="credit-cell" href="https://github.com/keshav-exe/clove" target="_blank" rel="noopener noreferrer">
+          <div class="credit-mark">KESHAV BAGAADE</div>
+          <div class="credit-title">Original Clove (macOS)</div>
+          <p class="credit-desc">Creator of Clove, MIT copyright holder, and originator of the Bayer 4&times;4 storage bar.</p>
+          <span class="credit-url">keshav-exe/clove &nearr;</span>
+        </a>
+
+        <a class="credit-cell" href="https://www.kshv.me/clove" target="_blank" rel="noopener noreferrer">
+          <div class="credit-mark">ORIGINAL SITE</div>
+          <div class="credit-title">kshv.me/clove</div>
+          <p class="credit-desc">Home of Keshav&rsquo;s native macOS edition for AI agents &amp; storage cleaning.</p>
+          <span class="credit-url">kshv.me/clove &nearr;</span>
+        </a>
+
+        <a class="credit-cell" href="https://github.com/anomalyco/rune" target="_blank" rel="noopener noreferrer">
+          <div class="credit-mark">UI ENGINE &amp; INSPIRATION</div>
+          <div class="credit-title">Rune &amp; GNOME Files</div>
+          <p class="credit-desc">Wayland/Vulkan rendering via Anomaly&rsquo;s Rune; spatial ergonomics inspired by Nautilus.</p>
+          <span class="credit-url">anomalyco/rune &nearr;</span>
+        </a>
+
+        <a class="credit-cell" href="https://pin.it/ygCGJ3lxo" target="_blank" rel="noopener noreferrer">
+          <div class="credit-mark">APP ICON CREDIT</div>
+          <div class="credit-title">Halftone Butterfly</div>
+          <p class="credit-desc">the icon was taken from here :-</p>
+          <span class="credit-url">pin.it/ygCGJ3lxo &nearr;</span>
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="col footer-inner">
+      <div class="footer-left">
+        <img src="assets/clove-icon.png" alt="" width="18" height="18" class="footer-icon" />
+        <span>CLOVE-LINUX &middot; V1.6.2 &middot; MIT LICENSE (COPYRIGHT &copy; 2026 KESHAV BAGAADE)</span>
+      </div>
+      <div class="footer-right">
+        <a href="https://github.com/ZeroiJ/clove-win" target="_blank" rel="noopener noreferrer">GITHUB</a>
+        <a href="https://aur.archlinux.org/packages/clove-linux" target="_blank" rel="noopener noreferrer">AUR</a>
+        <a href="https://github.com/ZeroiJ/clove-win/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG</a>
+        <a href="https://github.com/keshav-exe/clove" target="_blank" rel="noopener noreferrer">ORIGINAL CLOVE</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -4,6 +4,13 @@ All notable changes to Clove are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Static website in [`site/`](site/index.html) deployed live at `https://clove-linux.vercel.app`, with interactive Bayer 4×4 storage bar specimen, AUR quick-copy installer, Light/Dark scheme toggle, and upstream attribution.
+- Captured real `v1.6.2` desktop preview at [`docs/clove-linux-preview.png`](docs/clove-linux-preview.png).
+
+### Changed
+- Rewrote [`README.md`](README.md) for Linux / Arch / Omarchy (`clove-linux` AUR, keyboard shortcuts, source build, upstream attribution) and updated GitHub About metadata + homepage URL.
+
 ## [1.6.2] - 2026-11-26
 
 ### Changed

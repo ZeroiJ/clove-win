@@ -22,4 +22,5 @@ dist/
 /prototypes/_rune-upstream
 /prototypes/_rune-upstream/
 /inspiration/
+.vercel/
 
